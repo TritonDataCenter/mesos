@@ -2816,7 +2816,13 @@ void Master::_accept(
 
           // Add task.
           if (pending) {
-            _offeredResources -= addTask(task_, framework, slave);
+            Resources taskResources; Resources ports;
+            taskResources = addTask(task_, framework, slave);
+            ports = taskResources.get("ports");
+            taskResources -= ports;
+
+	    _offeredResources -= taskResources;
+
 
             // TODO(bmahler): Consider updating this log message to
             // indicate when the executor is also being launched.

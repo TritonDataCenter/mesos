@@ -381,6 +381,8 @@ Future<Nothing> Docker::run(
   argv.push_back("-e");
   argv.push_back("MESOS_SANDBOX=" + mappedDirectory);
 
+  /*
+
   foreach (const Volume& volume, containerInfo.volumes()) {
     string volumeConfig = volume.container_path();
     if (volume.has_host_path()) {
@@ -409,6 +411,11 @@ Future<Nothing> Docker::run(
   // Mapping sandbox directory into the container mapped directory.
   argv.push_back("-v");
   argv.push_back(sandboxDirectory + ":" + mappedDirectory);
+
+  */
+
+  arg.push_back("--rm");
+  arg.push_back("true");
 
   const string& image = dockerInfo.image();
 
