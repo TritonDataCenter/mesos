@@ -414,9 +414,6 @@ Future<Nothing> Docker::run(
 
   */
 
-  arg.push_back("--rm");
-  arg.push_back("true");
-
   const string& image = dockerInfo.image();
 
   argv.push_back("--net");

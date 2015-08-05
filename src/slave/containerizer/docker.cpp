@@ -1304,8 +1304,7 @@ void DockerContainerizerProcess::destroy(
 
     containers_.erase(containerId);
 
-    // Remove the broken container from the Docker host
-    //    remove(container->name(), None());
+    remove(container->name(), None());
     delete container;
 
     return;
@@ -1353,9 +1352,7 @@ void DockerContainerizerProcess::destroy(
     // the Docker::run.
     containers_.erase(containerId);
 
-    // Remove the broken container from the Docker host
-    //    remove(container->name(), None());
-
+    remove(container->name(), None());
     delete container;
 
     return;
@@ -1374,9 +1371,7 @@ void DockerContainerizerProcess::destroy(
 
     containers_.erase(containerId);
 
-    // Remove the broken container from the Docker host
-    //    remove(container->name(), None());
-
+    remove(container->name(), None());
     delete container;
 
     return;
@@ -1468,9 +1463,7 @@ void DockerContainerizerProcess::__destroy(
       container->name(),
       container->executorName());
 
-    // Remove the broken container from the Docker host
-    //    remove(container->name(), None());
-
+    remove(container->name(), None());
     delete container;
 
     return;
@@ -1514,8 +1507,6 @@ void DockerContainerizerProcess::___destroy(
     container->name(),
     container->executorName());
 
-
-  // Remove the broken container from the Docker host
   remove(container->name(), None());
   delete container;
 }
