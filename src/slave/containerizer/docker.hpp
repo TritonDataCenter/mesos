@@ -257,8 +257,12 @@ private:
 
     static std::string name(const SlaveID& slaveId, const std::string& id)
     {
-      return DOCKER_NAME_PREFIX + slaveId.value() + DOCKER_NAME_SEPERATOR +
-        stringify(id);
+      std::string slaveIdstring = slaveId.value();
+      std::transform(slaveIdstring.begin(), slaveIdstring.end(),
+		     slaveIdstring.begin(), ::tolower);
+
+      return DOCKER_NAME_PREFIX + slaveIdstring + DOCKER_NAME_SEPERATOR +
+             stringify(id);
     }
 
     Container(const ContainerID& id)
