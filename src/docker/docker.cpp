@@ -103,6 +103,7 @@ Try<Docker*> Docker::create(const string& path, bool validate)
     return docker;
   }
 
+/*
 #ifdef __linux__
   // Make sure that cgroups are mounted, and at least the 'cpu'
   // subsystem is attached.
@@ -115,6 +116,7 @@ Try<Docker*> Docker::create(const string& path, bool validate)
                  "to mount cgroups manually");
   }
 #endif // __linux__
+*/
 
   // Validate the version (and that we can use Docker at all).
   Future<Version> version = docker->version();
