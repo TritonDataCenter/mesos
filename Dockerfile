@@ -39,3 +39,5 @@ WORKDIR /opt/build
 
 # build and cleanup in a single layer
 RUN make -j4 install && cd / && rm -rf /opt
+
+WORKDIR /
