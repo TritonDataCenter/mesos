@@ -18,6 +18,7 @@
 
 #include <gmock/gmock.h>
 
+#include <string>
 #include <vector>
 
 #include <mesos/executor.hpp>
@@ -27,6 +28,8 @@
 #include <mesos/authentication/authentication.hpp>
 
 #include <mesos/master/allocator.hpp>
+
+#include <mesos/scheduler/scheduler.hpp>
 
 #include <process/future.hpp>
 #include <process/gmock.hpp>
@@ -68,6 +71,7 @@ using process::UPID;
 using process::http::OK;
 using process::http::Response;
 
+using std::string;
 using std::vector;
 
 using testing::_;
@@ -163,7 +167,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   ASSERT_SOME(slave);
 
   // Verify master/slave have 0 completed/running frameworks.
-  Future<Response> masterState = process::http::get(master.get(), "state.json");
+  Future<Response> masterState = process::http::get(master.get(), "state");
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, masterState);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(
@@ -205,8 +209,6 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   // Step 3. Create/launch a task.
   TaskInfo task =
     createTask(offers.get()[0], "sleep 10000", DEFAULT_EXECUTOR_ID);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long lasting task.
 
   EXPECT_CALL(executor, registered(_, _, _, _));
   EXPECT_CALL(executor, launchTask(_, _))
@@ -216,13 +218,13 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
   // Verify master and slave recognize the running task/framework.
-  masterState = process::http::get(master.get(), "state.json");
+  masterState = process::http::get(master.get(), "state");
 
   parse = JSON::parse<JSON::Object>(masterState.get().body);
   ASSERT_SOME(parse);
@@ -233,7 +235,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   EXPECT_EQ(1u,
     masterJSON.values["frameworks"].as<JSON::Array>().values.size());
 
-  Future<Response> slaveState = process::http::get(slave.get(), "state.json");
+  Future<Response> slaveState = process::http::get(slave.get(), "state");
 
   parse = JSON::parse<JSON::Object>(slaveState.get().body);
   ASSERT_SOME(parse);
@@ -260,7 +262,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   // At this point, the task is killed, but the framework is still
   // running.  This is because the executor has to time-out before
   // it exits.
-  masterState = process::http::get(master.get(), "state.json");
+  masterState = process::http::get(master.get(), "state");
   parse = JSON::parse<JSON::Object>(masterState.get().body);
   ASSERT_SOME(parse);
   masterJSON = parse.get();
@@ -270,7 +272,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   EXPECT_EQ(1u,
     masterJSON.values["frameworks"].as<JSON::Array>().values.size());
 
-  slaveState = process::http::get(slave.get(), "state.json");
+  slaveState = process::http::get(slave.get(), "state");
   parse = JSON::parse<JSON::Object>(slaveState.get().body);
   ASSERT_SOME(parse);
   slaveJSON = parse.get();
@@ -297,7 +299,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   Clock::resume();
 
   // Verify slave sees completed framework.
-  slaveState = process::http::get(slave.get(), "state.json");
+  slaveState = process::http::get(slave.get(), "state");
   parse = JSON::parse<JSON::Object>(slaveState.get().body);
   ASSERT_SOME(parse);
   slaveJSON = parse.get();
@@ -338,7 +340,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   Clock::settle();
   Clock::resume();
 
-  masterState = process::http::get(master.get(), "state.json");
+  masterState = process::http::get(master.get(), "state");
   parse = JSON::parse<JSON::Object>(masterState.get().body);
   ASSERT_SOME(parse);
   masterJSON = parse.get();
@@ -388,8 +390,7 @@ TEST_F(FaultToleranceTest, SchedulerFailover)
 
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
 
   MesosSchedulerDriver driver2(
@@ -486,8 +487,7 @@ TEST_F(FaultToleranceTest, SchedulerReregisterAfterFailoverTimeout)
   // framework id recorded from the first scheduler.
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
 
   MesosSchedulerDriver driver2(
@@ -556,8 +556,7 @@ TEST_F(FaultToleranceTest, SchedulerReregisterAfterUnregistration)
   // framework id recorded from the first scheduler.
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
 
   MesosSchedulerDriver driver2(
@@ -615,8 +614,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverRetriedReregistration)
 
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
 
   MesosSchedulerDriver driver2(
@@ -828,14 +826,11 @@ TEST_F(FaultToleranceTest, TaskLost)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_LOST, status.get().state());
@@ -886,9 +881,6 @@ TEST_F(FaultToleranceTest, SchedulerFailoverStatusUpdate)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   EXPECT_CALL(exec, registered(_, _, _, _));
 
   EXPECT_CALL(exec, launchTask(_, _))
@@ -901,7 +893,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverStatusUpdate)
                   _,
                   Not(AnyOf(Eq(master.get()), Eq(slave.get()))));
 
-  driver1.launchTasks(offers.get()[0].id(), tasks);
+  driver1.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(statusUpdateMessage);
 
@@ -911,8 +903,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverStatusUpdate)
 
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId);
 
   MesosSchedulerDriver driver2(
@@ -1102,9 +1093,6 @@ TEST_F(FaultToleranceTest, ForwardStatusUpdateUnknownExecutor)
   task.mutable_resources()->MergeFrom(offer.resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<Nothing> statusUpdate;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureSatisfy(&statusUpdate));    // TASK_RUNNING of task1.
@@ -1114,7 +1102,7 @@ TEST_F(FaultToleranceTest, ForwardStatusUpdateUnknownExecutor)
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
-  driver.launchTasks(offer.id(), tasks);
+  driver.launchTasks(offer.id(), {task});
 
   // Wait until TASK_RUNNING of task1 is received.
   AWAIT_READY(statusUpdate);
@@ -1154,7 +1142,7 @@ TEST_F(FaultToleranceTest, ForwardStatusUpdateUnknownExecutor)
 }
 
 
-TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkMessage)
+TEST_F(FaultToleranceTest, SchedulerFailoverExecutorToFrameworkMessage)
 {
   Try<PID<Master> > master = StartMaster();
   ASSERT_SOME(master);
@@ -1189,9 +1177,6 @@ TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkMessage)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> status;
   EXPECT_CALL(sched1, statusUpdate(&driver1, _))
     .WillOnce(FutureArg<1>(&status));
@@ -1203,15 +1188,14 @@ TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkMessage)
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
-  driver1.launchTasks(offers.get()[0].id(), tasks);
+  driver1.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
 
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId);
 
   MesosSchedulerDriver driver2(
@@ -1244,6 +1228,106 @@ TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkMessage)
   execDriver->sendFrameworkMessage("Executor to Framework message");
 
   AWAIT_READY(frameworkMessage);
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver1.stop();
+  driver2.stop();
+
+  driver1.join();
+  driver2.join();
+
+  Shutdown();
+}
+
+
+TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkToExecutorMessage)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+
+  Try<PID<Slave> > slave = StartSlave(&exec);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched1;
+  MesosSchedulerDriver driver1(
+      &sched1, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  FrameworkID frameworkId;
+  EXPECT_CALL(sched1, registered(&driver1, _, _))
+    .WillOnce(SaveArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver1.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched1, statusUpdate(&driver1, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  ExecutorDriver* execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(SaveArg<0>(&execDriver));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
+
+  driver1.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+
+  MockScheduler sched2;
+
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
+  framework2.mutable_id()->MergeFrom(frameworkId);
+
+  MesosSchedulerDriver driver2(
+      &sched2, framework2, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched2, registered(&driver2, frameworkId, _))
+    .WillOnce(FutureSatisfy(&registered));
+
+  Future<Nothing> error;
+  EXPECT_CALL(sched1, error(&driver1, "Framework failed over"))
+    .WillOnce(FutureSatisfy(&error));
+
+  driver2.start();
+
+  AWAIT_READY(error);
+
+  AWAIT_READY(registered);
+
+  Future<string> frameworkMessage;
+  EXPECT_CALL(exec, frameworkMessage(_, _))
+    .WillOnce(FutureArg<1>(&frameworkMessage));
+
+  // Since 'sched2' doesn't receive any offers the framework message
+  // should go through the master.
+  Future<mesos::scheduler::Call> messageCall = FUTURE_CALL(
+      mesos::scheduler::Call(),
+      mesos::scheduler::Call::MESSAGE,
+      _,
+      master.get());
+
+  driver2.sendFrameworkMessage(
+      DEFAULT_EXECUTOR_ID, offers.get()[0].slave_id(), "hello world");
+
+  AWAIT_READY(messageCall);
+
+  AWAIT_EQ("hello world", frameworkMessage);
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -1294,8 +1378,8 @@ TEST_F(FaultToleranceTest, IgnoreKillTaskFromUnregisteredFramework)
   EXPECT_CALL(sched1, statusUpdate(&driver1, _))
     .WillOnce(FutureArg<1>(&status));
 
-  Future<StatusUpdateAcknowledgementMessage> statusUpdateAcknowledgementMessage
-    = FUTURE_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, _);
+  Future<mesos::scheduler::Call> acknowledgeCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::ACKNOWLEDGE, _, _);
 
   ExecutorDriver* execDriver;
   EXPECT_CALL(exec, registered(_, _, _, _))
@@ -1312,13 +1396,12 @@ TEST_F(FaultToleranceTest, IgnoreKillTaskFromUnregisteredFramework)
   // Wait for the status update acknowledgement to be sent. This
   // ensures the slave doesn't resend the TASK_RUNNING update to the
   // failed over scheduler (below).
-  AWAIT_READY(statusUpdateAcknowledgementMessage);
+  AWAIT_READY(acknowledgeCall);
 
   // Now start the second failed over scheduler.
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId);
 
   MesosSchedulerDriver driver2(
@@ -1354,12 +1437,12 @@ TEST_F(FaultToleranceTest, IgnoreKillTaskFromUnregisteredFramework)
   EXPECT_CALL(sched2, statusUpdate(&driver2, _))
     .WillOnce(FutureArg<1>(&status2));
 
-  Future<KillTaskMessage> killTaskMessage =
-    FUTURE_PROTOBUF(KillTaskMessage(), _, _);
+  Future<mesos::scheduler::Call> killCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::KILL, _, _);
 
   driver1.killTask(status.get().task_id());
 
-  AWAIT_READY(killTaskMessage);
+  AWAIT_READY(killCall);
 
   // By this point the master must have processed and ignored the
   // 'killTask' message from the first framework. To verify this,
@@ -1423,9 +1506,6 @@ TEST_F(FaultToleranceTest, SchedulerExit)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
@@ -1435,7 +1515,7 @@ TEST_F(FaultToleranceTest, SchedulerExit)
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
@@ -1723,6 +1803,147 @@ TEST_F(FaultToleranceTest, SplitBrainMasters)
 
   driver.stop();
   driver.join();
+
+  Shutdown();
+}
+
+// This test verifies that when a framework re-registers with updated
+// FrameworkInfo, it gets updated in the master. The steps involved
+// are:
+//   1. Launch a master, slave and scheduler.
+//   2. Record FrameworkID of launched scheduler.
+//   3. Launch a second scheduler which has the same FrameworkID as
+//      the first scheduler and also has updated FrameworkInfo.
+//   4. Verify that the state of the master is updated with the new
+//      FrameworkInfo object.
+TEST_F(FaultToleranceTest, UpdateFrameworkInfoOnSchedulerFailover)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  Try<PID<Slave> > slave = StartSlave();
+  ASSERT_SOME(slave);
+
+  // Launch the first (i.e., failing) scheduler and wait until
+  // registered gets called to launch the second (i.e., failover)
+  // scheduler with updated information.
+
+  FrameworkInfo finfo1 = DEFAULT_FRAMEWORK_INFO;
+  finfo1.set_name("Framework 1");
+  finfo1.set_failover_timeout(1000);
+  finfo1.mutable_labels()->add_labels()->CopyFrom(createLabel("foo", "bar"));
+
+  MockScheduler sched1;
+  MesosSchedulerDriver driver1(
+      &sched1, finfo1, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched1, registered(&driver1, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillRepeatedly(Return());
+
+  driver1.start();
+
+  AWAIT_READY(frameworkId);
+
+  // Now launch the second (i.e., failover) scheduler using the
+  // framework id recorded from the first scheduler, along with the
+  // updated FrameworkInfo and wait until it gets a registered
+  // callback.
+
+  MockScheduler sched2;
+
+  FrameworkInfo finfo2 = DEFAULT_FRAMEWORK_INFO;
+  finfo2.mutable_id()->MergeFrom(frameworkId.get());
+  auto capabilityType = FrameworkInfo::Capability::REVOCABLE_RESOURCES;
+  finfo2.add_capabilities()->set_type(capabilityType);
+  finfo2.set_name("Framework 2");
+  finfo2.set_webui_url("http://localhost:8080/");
+  finfo2.set_failover_timeout(100);
+  finfo2.set_hostname("myHostname");
+  finfo2.mutable_labels()->add_labels()->CopyFrom(createLabel("baz", "qux"));
+
+  MesosSchedulerDriver driver2(
+      &sched2, finfo2, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<Nothing> sched2Registered;
+  EXPECT_CALL(sched2, registered(&driver2, frameworkId.get(), _))
+    .WillOnce(FutureSatisfy(&sched2Registered));
+
+  EXPECT_CALL(sched2, resourceOffers(&driver2, _))
+    .WillRepeatedly(Return());
+
+  EXPECT_CALL(sched2, offerRescinded(&driver2, _))
+    .Times(AtMost(1));
+
+  // Scheduler1's expectations.
+  EXPECT_CALL(sched1, offerRescinded(&driver1, _))
+    .Times(AtMost(1));
+
+  Future<Nothing> sched1Error;
+  EXPECT_CALL(sched1, error(&driver1, "Framework failed over"))
+    .WillOnce(FutureSatisfy(&sched1Error));
+
+  driver2.start();
+
+  AWAIT_READY(sched2Registered);
+
+  AWAIT_READY(sched1Error);
+
+  Future<process::http::Response> response = process::http::get(
+    master.get(), "state.json");
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
+
+  Try<JSON::Object> parse =
+    JSON::parse<JSON::Object>(response.get().body);
+  ASSERT_SOME(parse);
+
+  JSON::Object state = parse.get();
+  EXPECT_EQ(1u, state.values.count("frameworks"));
+  JSON::Array frameworks =
+    state.values["frameworks"].as<JSON::Array>();
+  EXPECT_EQ(1u, frameworks.values.size());
+  JSON::Object framework = frameworks.values.front().as<JSON::Object>();
+
+  EXPECT_EQ(1u, framework.values.count("name"));
+  JSON::String name = framework.values["name"].as<JSON::String>();
+  EXPECT_EQ(finfo2.name(), name.value);
+
+  EXPECT_EQ(1u, framework.values.count("webui_url"));
+  JSON::String webuiUrl = framework.values["webui_url"].as<JSON::String>();
+  EXPECT_EQ(finfo2.webui_url(), webuiUrl.value);
+
+  EXPECT_EQ(1u, framework.values.count("failover_timeout"));
+  JSON::Number failoverTimeout =
+    framework.values["failover_timeout"].as<JSON::Number>();
+  EXPECT_EQ(finfo2.failover_timeout(), failoverTimeout.as<double>());
+
+  EXPECT_EQ(1u, framework.values.count("hostname"));
+  JSON::String hostname = framework.values["hostname"].as<JSON::String>();
+  EXPECT_EQ(finfo2.hostname(), hostname.value);
+
+  EXPECT_EQ(1u, framework.values.count("capabilities"));
+  JSON::Array capabilities =
+    framework.values["capabilities"].as<JSON::Array>();
+  EXPECT_EQ(1u, capabilities.values.size());
+  JSON::String capability = capabilities.values.front().as<JSON::String>();
+  EXPECT_EQ(FrameworkInfo::Capability::Type_Name(capabilityType),
+            capability.value);
+
+  EXPECT_EQ(1u, framework.values.count("labels"));
+  JSON::Array labels = framework.values["labels"].as<JSON::Array>();
+
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("baz", "qux"))),
+      labels.values[0]);
+
+  EXPECT_EQ(DRIVER_STOPPED, driver2.stop());
+  EXPECT_EQ(DRIVER_STOPPED, driver2.join());
+
+  EXPECT_EQ(DRIVER_ABORTED, driver1.stop());
+  EXPECT_EQ(DRIVER_STOPPED, driver1.join());
 
   Shutdown();
 }

@@ -19,49 +19,49 @@
 #include <stdint.h>
 
 #include <vector>
-#include <set>
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
-
-#include <mesos/resources.hpp>
-#include <mesos/values.hpp>
 
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/io.hpp>
 #include <process/pid.hpp>
+#include <process/reap.hpp>
 #include <process/subprocess.hpp>
 
 #include <stout/bytes.hpp>
 #include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
-#include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
 #include <stout/lambda.hpp>
-#include <stout/nothing.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 
 #include "linux/cgroups.hpp"
+#include "linux/perf.hpp"
 
 #include "slave/containerizer/isolators/cgroups/perf_event.hpp"
 
-using namespace process;
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
+using mesos::slave::Isolator;
 
 using std::list;
 using std::set;
 using std::string;
 using std::vector;
 
-using mesos::slave::ExecutorRunState;
-using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
+using process::Clock;
+using process::Failure;
+using process::Future;
+using process::PID;
+using process::Time;
 
 namespace mesos {
 namespace internal {
@@ -111,25 +111,10 @@ Try<Isolator*> CgroupsPerfEventIsolatorProcess::create(const Flags& flags)
             << " every " << flags.perf_interval
             << " for events: " << stringify(events);
 
-  process::Owned<IsolatorProcess> process(
-      new CgroupsPerfEventIsolatorProcess(flags, hierarchy.get()));
+  process::Owned<MesosIsolatorProcess> process(
+      new CgroupsPerfEventIsolatorProcess(flags, hierarchy.get(), events));
 
-  return new Isolator(process);
-}
-
-
-CgroupsPerfEventIsolatorProcess::CgroupsPerfEventIsolatorProcess(
-    const Flags& _flags,
-    const string& _hierarchy)
-  : flags(_flags),
-    hierarchy(_hierarchy)
-{
-  CHECK_SOME(flags.perf_events);
-
-  foreach (const string& event,
-           strings::tokenize(flags.perf_events.get(), ",")) {
-    events.insert(event);
-  }
+  return new MesosIsolator(process);
 }
 
 
@@ -144,11 +129,11 @@ void CgroupsPerfEventIsolatorProcess::initialize()
 
 
 Future<Nothing> CgroupsPerfEventIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
-  foreach (const ExecutorRunState& state, states) {
-    const ContainerID& containerId = state.id;
+  foreach (const ContainerState& state, states) {
+    const ContainerID& containerId = state.container_id();
     const string cgroup = path::join(flags.cgroups_root, containerId.value());
 
     Try<bool> exists = cgroups::exists(hierarchy, cgroup);
@@ -222,11 +207,10 @@ Future<Nothing> CgroupsPerfEventIsolatorProcess::recover(
 }
 
 
-Future<Option<CommandInfo>> CgroupsPerfEventIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> CgroupsPerfEventIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (infos.contains(containerId)) {
@@ -298,11 +282,11 @@ Future<Nothing> CgroupsPerfEventIsolatorProcess::isolate(
 }
 
 
-Future<Limitation> CgroupsPerfEventIsolatorProcess::watch(
+Future<ContainerLimitation> CgroupsPerfEventIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   // No resources are limited.
-  return Future<Limitation>();
+  return Future<ContainerLimitation>();
 }
 
 
@@ -386,44 +370,33 @@ Future<hashmap<string, PerfStatistics>> discardSample(
 
 void CgroupsPerfEventIsolatorProcess::sample()
 {
+  // Collect a perf sample for all cgroups that are not being
+  // destroyed. Since destroyal is asynchronous, 'perf stat' may
+  // fail if the cgroup is destroyed before running perf.
   set<string> cgroups;
+
   foreachvalue (Info* info, infos) {
     CHECK_NOTNULL(info);
 
-    if (info->destroying) {
-      // Skip cgroups if destroy has started because it's asynchronous
-      // and "perf stat" will fail if the cgroup has been destroyed
-      // by the time we actually run perf.
-      continue;
+    if (!info->destroying) {
+      cgroups.insert(info->cgroup);
     }
-
-    cgroups.insert(info->cgroup);
   }
 
-  if (cgroups.size() > 0) {
-    // The timeout includes an allowance of twice the process::reap
-    // interval (currently one second) to ensure we see the perf
-    // process exit. If the sample is not ready after the timeout
-    // something very unexpected has occurred so we discard it and
-    // halt all sampling.
-    Duration timeout = flags.perf_duration + Seconds(2);
+  // The discard timeout includes an allowance of twice the
+  // reaper interval to ensure we see the perf process exit.
+  Duration timeout = flags.perf_duration + process::MAX_REAP_INTERVAL() * 2;
 
-    perf::sample(events, cgroups, flags.perf_duration)
-      .after(timeout,
-             lambda::bind(&discardSample,
-                          lambda::_1,
-                          flags.perf_duration,
-                          timeout))
-      .onAny(defer(PID<CgroupsPerfEventIsolatorProcess>(this),
-                   &CgroupsPerfEventIsolatorProcess::_sample,
-                   Clock::now() + flags.perf_interval,
-                   lambda::_1));
-  } else {
-    // No cgroups to sample for now so just schedule the next sample.
-    delay(flags.perf_interval,
-          PID<CgroupsPerfEventIsolatorProcess>(this),
-          &CgroupsPerfEventIsolatorProcess::sample);
-  }
+  perf::sample(events, cgroups, flags.perf_duration)
+    .after(timeout,
+           lambda::bind(&discardSample,
+                        lambda::_1,
+                        flags.perf_duration,
+                        timeout))
+    .onAny(defer(PID<CgroupsPerfEventIsolatorProcess>(this),
+                 &CgroupsPerfEventIsolatorProcess::_sample,
+                 Clock::now() + flags.perf_interval,
+                 lambda::_1));
 }
 
 
@@ -432,23 +405,23 @@ void CgroupsPerfEventIsolatorProcess::_sample(
     const Future<hashmap<string, PerfStatistics>>& statistics)
 {
   if (!statistics.isReady()) {
-    // Failure can occur for many reasons but all are unexpected and
-    // indicate something is not right so we'll stop sampling.
-    LOG(ERROR) << "Failed to get perf sample, sampling will be halted: "
-               << (statistics.isFailed() ? statistics.failure() : "discarded");
-    return;
-  }
+    // In case the failure is transient or this is due to a timeout,
+    // we continue sampling. Note that since sampling is done on an
+    // interval, it should be ok if this is a non-transient failure.
+    LOG(ERROR) << "Failed to get perf sample: "
+               << (statistics.isFailed()
+                   ? statistics.failure()
+                   : "discarded due to timeout");
+  } else {
+    // Store the latest statistics, note that cgroups added in the
+    // interim will be picked up by the next sample.
+    foreachvalue (Info* info, infos) {
+      CHECK_NOTNULL(info);
 
-  foreachvalue (Info* info, infos) {
-    CHECK_NOTNULL(info);
-
-    if (!statistics.get().contains(info->cgroup)) {
-      // This must be a newly added cgroup and isn't in this sample;
-      // it should be included in the next sample.
-      continue;
+      if (statistics->contains(info->cgroup)) {
+        info->statistics = statistics->get(info->cgroup).get();
+      }
     }
-
-    info->statistics = statistics.get().get(info->cgroup).get();
   }
 
   // Schedule sample for the next time.

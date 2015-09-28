@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_GMOCK_HPP__
 #define __PROCESS_GMOCK_HPP__
 
@@ -170,7 +184,7 @@ private:
   private:
     // Not copyable, not assignable.
     Implementation(const Implementation&);
-    Implementation& operator = (const Implementation&);
+    Implementation& operator=(const Implementation&);
 
     process::Promise<R> promise;
     const ::testing::Action<F> action;
@@ -316,6 +330,23 @@ MATCHER_P3(MessageMatcher, name, from, to, "")
 }
 
 
+// This matches protobuf messages that are described using the
+// standard protocol buffer "union" trick, see:
+// https://developers.google.com/protocol-buffers/docs/techniques#union.
+MATCHER_P4(UnionMessageMatcher, message, unionType, from, to, "")
+{
+  const process::MessageEvent& event = ::std::tr1::get<0>(arg);
+  message_type message;
+
+  return (testing::Matcher<std::string>(message.GetTypeName()).Matches(
+              event.message->name) &&
+          message.ParseFromString(event.message->body) &&
+          testing::Matcher<unionType_type>(unionType).Matches(message.type()) &&
+          testing::Matcher<process::UPID>(from).Matches(event.message->from) &&
+          testing::Matcher<process::UPID>(to).Matches(event.message->to));
+}
+
+
 MATCHER_P2(DispatchMatcher, pid, method, "")
 {
   const DispatchEvent& event = ::std::tr1::get<0>(arg);
@@ -333,6 +364,28 @@ Future<Message> FutureMessage(Name name, From from, To to, bool drop = false)
   synchronized (filter->mutex) {
     EXPECT_CALL(filter->mock, filter(testing::A<const MessageEvent&>()))
       .With(MessageMatcher(name, from, to))
+      .WillOnce(testing::DoAll(FutureArgField<0>(
+                                   &MessageEvent::message,
+                                   &future),
+                               testing::Return(drop)))
+      .RetiresOnSaturation(); // Don't impose any subsequent expectations.
+  }
+
+  return future;
+}
+
+
+template <typename Message, typename UnionType, typename From, typename To>
+Future<process::Message> FutureUnionMessage(
+    Message message, UnionType unionType, From from, To to, bool drop = false)
+{
+  TestsFilter* filter =
+    FilterTestEventListener::instance()->install();
+
+  Future<process::Message> future;
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const MessageEvent&>()))
+      .With(UnionMessageMatcher(message, unionType, from, to))
       .WillOnce(testing::DoAll(FutureArgField<0>(
                                    &MessageEvent::message,
                                    &future),
@@ -373,6 +426,18 @@ void DropMessages(Name name, From from, To to)
 }
 
 
+template <typename Message, typename UnionType, typename From, typename To>
+void DropUnionMessages(Message message, UnionType unionType, From from, To to)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const MessageEvent&>()))
+      .With(UnionMessageMatcher(message, unionType, from, to))
+      .WillRepeatedly(testing::Return(true));
+  }
+}
+
+
 template <typename Name, typename From, typename To>
 void ExpectNoFutureMessages(Name name, From from, To to)
 {
@@ -380,6 +445,19 @@ void ExpectNoFutureMessages(Name name, From from, To to)
   synchronized (filter->mutex) {
     EXPECT_CALL(filter->mock, filter(testing::A<const MessageEvent&>()))
       .With(MessageMatcher(name, from, to))
+      .Times(0);
+  }
+}
+
+
+template <typename Message, typename UnionType, typename From, typename To>
+void ExpectNoFutureUnionMessages(
+    Message message, UnionType unionType, From from, To to)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const MessageEvent&>()))
+      .With(UnionMessageMatcher(message, unionType, from, to))
       .Times(0);
   }
 }

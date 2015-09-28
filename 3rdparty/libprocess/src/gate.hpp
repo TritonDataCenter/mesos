@@ -1,7 +1,22 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __GATE_HPP__
 #define __GATE_HPP__
 
-// TODO(benh): Build implementation directly on-top-of futex's for Linux.
+#include <condition_variable>
+#include <mutex>
 
 #include <stout/synchronized.hpp>
 
@@ -13,21 +28,13 @@ public:
 private:
   int waiters;
   state_t state;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
+  std::mutex mutex;
+  std::condition_variable cond;
 
 public:
-  Gate() : waiters(0), state(0)
-  {
-    pthread_mutex_init(&mutex, NULL);
-    pthread_cond_init(&cond, NULL);
-  }
+  Gate() : waiters(0), state(0) {}
 
-  ~Gate()
-  {
-    pthread_cond_destroy(&cond);
-    pthread_mutex_destroy(&mutex);
-  }
+  ~Gate() = default;
 
   // Signals the state change of the gate to any (at least one) or
   // all (if 'all' is true) of the threads waiting on it.
@@ -36,9 +43,9 @@ public:
     synchronized (mutex) {
       state++;
       if (all) {
-        pthread_cond_broadcast(&cond);
+        cond.notify_all();
       } else {
-        pthread_cond_signal(&cond);
+        cond.notify_one();
       }
     }
   }
@@ -51,7 +58,7 @@ public:
       waiters++;
       state_t old = state;
       while (old == state) {
-        pthread_cond_wait(&cond, &mutex);
+        synchronized_wait(&cond, &mutex);
       }
       waiters--;
     }
@@ -75,7 +82,7 @@ public:
   {
     synchronized (mutex) {
       while (old == state) {
-        pthread_cond_wait(&cond, &mutex);
+        synchronized_wait(&cond, &mutex);
       }
 
       waiters--;

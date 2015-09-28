@@ -362,13 +362,19 @@ void Slave::initialize()
   string hostname;
 
   if (flags.hostname.isNone()) {
-    Try<string> result = net::getHostname(self().address.ip);
+    if (flags.hostname_lookup) {
+      Try<string> result = net::getHostname(self().address.ip);
 
-    if (result.isError()) {
-      LOG(FATAL) << "Failed to get hostname: " << result.error();
+      if (result.isError()) {
+        LOG(FATAL) << "Failed to get hostname: " << result.error();
+      }
+
+      hostname = result.get();
+    } else {
+      // We use the IP address for hostname if the user requested us
+      // NOT to look it up, and it wasn't explicitly set via --hostname:
+      hostname = stringify(self().address.ip);
     }
-
-    hostname = result.get();
   } else {
     hostname = flags.hostname.get();
   }
@@ -494,16 +500,31 @@ void Slave::initialize()
   // Setup HTTP routes.
   Http http = Http(this);
 
-  route("/health",
-        Http::HEALTH_HELP,
+  route("/api/v1/executor",
+        Http::EXECUTOR_HELP,
         [http](const process::http::Request& request) {
-          return http.health(request);
+          Http::log(request);
+          return http.executor(request);
         });
+
+  // TODO(ijimenez): Remove this endpoint at the end of the
+  // deprecation cycle on 0.26.
   route("/state.json",
         Http::STATE_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
           return http.state(request);
+        });
+  route("/state",
+        Http::STATE_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.state(request);
+        });
+  route("/health",
+        Http::HEALTH_HELP,
+        [http](const process::http::Request& request) {
+          return http.health(request);
         });
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
@@ -854,7 +875,7 @@ void Slave::registered(
     masterPingTimeout = DEFAULT_MASTER_PING_TIMEOUT();
   }
 
-  switch(state) {
+  switch (state) {
     case DISCONNECTED: {
       LOG(INFO) << "Registered with master " << master.get()
                 << "; given slave ID " << slaveId;
@@ -954,7 +975,7 @@ void Slave::reregistered(
     masterPingTimeout = DEFAULT_MASTER_PING_TIMEOUT();
   }
 
-  switch(state) {
+  switch (state) {
     case DISCONNECTED:
       LOG(INFO) << "Re-registered with master " << master.get();
       state = RUNNING;
@@ -1165,13 +1186,16 @@ void Slave::doReliableRegistration(Duration maxBackoff)
     foreach (const Owned<Framework>& completedFramework, completedFrameworks) {
       VLOG(1) << "Reregistering completed framework "
                 << completedFramework->id();
+
       Archive::Framework* completedFramework_ =
         message.add_completed_frameworks();
-      FrameworkInfo* frameworkInfo =
-        completedFramework_->mutable_framework_info();
-      frameworkInfo->CopyFrom(completedFramework->info);
 
-      completedFramework_->set_pid(completedFramework->pid);
+      completedFramework_->mutable_framework_info()->CopyFrom(
+          completedFramework->info);
+
+      if (completedFramework->pid.isSome()) {
+        completedFramework_->set_pid(completedFramework->pid.get());
+      }
 
       foreach (const Owned<Executor>& executor,
                completedFramework->completedExecutors) {
@@ -1179,10 +1203,12 @@ void Slave::doReliableRegistration(Duration maxBackoff)
                 << " with " << executor->terminatedTasks.size()
                 << " terminated tasks, " << executor->completedTasks.size()
                 << " completed tasks";
+
         foreach (const Task* task, executor->terminatedTasks.values()) {
           VLOG(2) << "Reregistering terminated task " << task->task_id();
           completedFramework_->add_tasks()->CopyFrom(*task);
         }
+
         foreach (const std::shared_ptr<Task>& task, executor->completedTasks) {
           VLOG(2) << "Reregistering completed task " << task->task_id();
           completedFramework_->add_tasks()->CopyFrom(*task);
@@ -1220,9 +1246,9 @@ Future<bool> Slave::unschedule(const string& path)
 // send TASK_LOST to the framework.
 void Slave::runTask(
     const UPID& from,
-    const FrameworkInfo& frameworkInfo_,
+    const FrameworkInfo& frameworkInfo,
     const FrameworkID& frameworkId_,
-    const string& pid,
+    const UPID& pid,
     TaskInfo task)
 {
   if (master != from) {
@@ -1232,10 +1258,10 @@ void Slave::runTask(
     return;
   }
 
-  // Merge frameworkId_ into frameworkInfo.
-  FrameworkInfo frameworkInfo = frameworkInfo_;
   if (!frameworkInfo.has_id()) {
-    frameworkInfo.mutable_id()->CopyFrom(frameworkId_);
+    LOG(ERROR) << "Ignoring run task message from " << from
+               << " because it does not have a framework ID";
+    return;
   }
 
   // Create frameworkId alias to use in the rest of the function.
@@ -1265,12 +1291,6 @@ void Slave::runTask(
     return;
   }
 
-  if (HookManager::hooksAvailable()) {
-    // Set task labels from run task label decorator.
-    task.mutable_labels()->CopyFrom(
-        HookManager::slaveRunTaskLabelDecorator(task, frameworkInfo, info));
-  }
-
   Future<bool> unschedule = true;
 
   // If we are about to create a new framework, unschedule the work
@@ -1291,7 +1311,13 @@ void Slave::runTask(
       unschedule = unschedule.then(defer(self(), &Self::unschedule, path));
     }
 
-    framework = new Framework(this, frameworkInfo, pid);
+    Option<UPID> frameworkPid = None();
+
+    if (pid != UPID()) {
+      frameworkPid = pid;
+    }
+
+    framework = new Framework(this, frameworkInfo, frameworkPid);
     frameworks[frameworkId] = framework;
 
     // Is this same framework in completedFrameworks? If so, move the completed
@@ -1311,6 +1337,12 @@ void Slave::runTask(
 
   const ExecutorInfo executorInfo = getExecutorInfo(frameworkId, task);
   const ExecutorID& executorId = executorInfo.executor_id();
+
+  if (HookManager::hooksAvailable()) {
+    // Set task labels from run task label decorator.
+    task.mutable_labels()->CopyFrom(HookManager::slaveRunTaskLabelDecorator(
+        task, executorInfo, frameworkInfo, info));
+  }
 
   // We add the task to 'pending' to ensure the framework is not
   // removed and the framework and top level executor directories
@@ -1340,14 +1372,13 @@ void Slave::runTask(
 
   // Run the task after the unschedules are done.
   unschedule.onAny(
-      defer(self(), &Self::_runTask, lambda::_1, frameworkInfo, pid, task));
+      defer(self(), &Self::_runTask, lambda::_1, frameworkInfo, task));
 }
 
 
 void Slave::_runTask(
     const Future<bool>& future,
     const FrameworkInfo& frameworkInfo,
-    const string& pid,
     const TaskInfo& task)
 {
   const FrameworkID frameworkId = frameworkInfo.id();
@@ -1458,7 +1489,7 @@ void Slave::_runTask(
           TASK_LOST,
           TaskStatus::SOURCE_SLAVE,
           UUID::random(),
-         "The checkpointed resources being used by the task are unknown to "
+          "The checkpointed resources being used by the task are unknown to "
           "the slave",
           TaskStatus::REASON_RESOURCES_UNKNOWN);
 
@@ -1731,10 +1762,13 @@ void Slave::runTasks(
               << "' of framework " << framework->id();
 
     RunTaskMessage message;
-    message.mutable_framework_id()->MergeFrom(framework->id());
     message.mutable_framework()->MergeFrom(framework->info);
-    message.set_pid(framework->pid);
     message.mutable_task()->MergeFrom(task);
+
+    // Note that 0.23.x executors require the 'pid' to be set
+    // to decode the message, but do not use the field.
+    message.set_pid(framework->pid.getOrElse(UPID()));
+
     send(executor->pid, message);
   }
 }
@@ -2087,7 +2121,9 @@ void Slave::schedulerMessage(
 }
 
 
-void Slave::updateFramework(const FrameworkID& frameworkId, const string& pid)
+void Slave::updateFramework(
+    const FrameworkID& frameworkId,
+    const UPID& pid)
 {
   CHECK(state == RECOVERING || state == DISCONNECTED ||
         state == RUNNING || state == TERMINATING)
@@ -2115,15 +2151,25 @@ void Slave::updateFramework(const FrameworkID& frameworkId, const string& pid)
     case Framework::RUNNING: {
       LOG(INFO) << "Updating framework " << frameworkId << " pid to " << pid;
 
-      framework->pid = pid;
+      if (pid == UPID()) {
+        framework->pid = None();
+      } else {
+        framework->pid = pid;
+      }
+
       if (framework->info.checkpoint()) {
-        // Checkpoint the framework pid.
+        // Checkpoint the framework pid, note that when the 'pid'
+        // is None, we checkpoint a default UPID() because
+        // 0.23.x slaves consider a missing pid file to be an
+        // error.
         const string path = paths::getFrameworkPidPath(
             metaDir, info.id(), frameworkId);
 
-        VLOG(1) << "Checkpointing framework pid '"
-                << framework->pid << "' to '" << path << "'";
-        CHECK_SOME(state::checkpoint(path, framework->pid));
+        VLOG(1) << "Checkpointing framework pid"
+                << " '" << framework->pid.getOrElse(UPID()) << "'"
+                << " to '" << path << "'";
+
+        CHECK_SOME(state::checkpoint(path, framework->pid.getOrElse(UPID())));
       }
 
       // Inform status update manager to immediately resend any pending
@@ -2674,18 +2720,35 @@ void Slave::statusUpdate(StatusUpdate update, const UPID& pid)
         state == RUNNING || state == TERMINATING)
     << state;
 
-  // TODO(bmahler): With the HTTP API, we must validate the UUID
-  // inside the TaskStatus. For now, we only care about the UUID
-  // inside the StatusUpdate, as the scheduler driver overwrites it.
   if (!update.has_uuid()) {
     LOG(WARNING) << "Ignoring status update " << update << " without 'uuid'";
     metrics.invalid_status_updates++;
     return;
   }
 
-  // Set the source before forwarding the status update.
+  // TODO(bmahler): With the HTTP API, we must validate the UUID
+  // inside the TaskStatus. For now, we ensure that the uuid of task
+  // status matches the update's uuid, in case the executor is using
+  // pre 0.23.x driver.
+  update.mutable_status()->set_uuid(update.uuid());
+
+  // Set the source and UUID before forwarding the status update.
   update.mutable_status()->set_source(
       pid == UPID() ? TaskStatus::SOURCE_SLAVE : TaskStatus::SOURCE_EXECUTOR);
+
+  // Set TaskStatus.executor_id if not already set; overwrite existing
+  // value if already set.
+  if (update.has_executor_id()) {
+    if (update.status().has_executor_id() &&
+        update.status().executor_id() != update.executor_id()) {
+      LOG(WARNING) << "Executor ID mismatch in status update from " << pid
+                   << "; overwriting received '"
+                   << update.status().executor_id() << "' with expected'"
+                   << update.executor_id() << "'";
+    }
+    update.mutable_status()->mutable_executor_id()->CopyFrom(
+        update.executor_id());
+  }
 
   Framework* framework = getFramework(update.framework_id());
   if (framework == NULL) {
@@ -2706,6 +2769,33 @@ void Slave::statusUpdate(StatusUpdate update, const UPID& pid)
                  << " for terminating framework " << framework->id();
     metrics.invalid_status_updates++;
     return;
+  }
+
+  if (HookManager::hooksAvailable()) {
+    // Even though the hook(s) return a TaskStatus, we only use two fields:
+    // container_status and labels. Remaining fields are discarded.
+    TaskStatus statusFromHooks =
+      HookManager::slaveTaskStatusDecorator(
+          update.framework_id(), update.status());
+    if (statusFromHooks.has_labels()) {
+      update.mutable_status()->mutable_labels()->CopyFrom(
+          statusFromHooks.labels());
+    }
+
+    if (statusFromHooks.has_container_status()) {
+      update.mutable_status()->mutable_container_status()->CopyFrom(
+          statusFromHooks.container_status());
+    }
+  }
+
+  // Fill in the container IP address with the IP from the agent PID, if not
+  // already filled in.
+  // TODO(karya): Fill in the IP address by looking up the executor PID.
+  ContainerStatus* containerStatus =
+    update.mutable_status()->mutable_container_status();
+  if (containerStatus->network_infos().size() == 0) {
+    NetworkInfo* networkInfo = containerStatus->add_network_infos();
+    networkInfo->set_ip_address(stringify(self().address.ip));
   }
 
   TaskStatus status = update.status();
@@ -2982,16 +3072,23 @@ void Slave::executorMessage(
     return;
   }
 
-
-  LOG(INFO) << "Sending message for framework " << frameworkId
-            << " to " << framework->pid;
-
   ExecutorToFrameworkMessage message;
   message.mutable_slave_id()->MergeFrom(slaveId);
   message.mutable_framework_id()->MergeFrom(frameworkId);
   message.mutable_executor_id()->MergeFrom(executorId);
   message.set_data(data);
-  send(framework->pid, message);
+
+  CHECK_SOME(master);
+
+  if (framework->pid.isSome()) {
+    LOG(INFO) << "Sending message for framework " << frameworkId
+              << " to " << framework->pid.get();
+    send(framework->pid.get(), message);
+  } else {
+    LOG(INFO) << "Sending message for framework " << frameworkId
+              << " through the master " << master.get();
+    send(master.get(), message);
+  }
 
   metrics.valid_framework_messages++;
 }
@@ -3213,23 +3310,10 @@ ExecutorInfo Slave::getExecutorInfo(
           "cpus:" + stringify(DEFAULT_EXECUTOR_CPUS) + ";" +
           "mem:" + stringify(DEFAULT_EXECUTOR_MEM.megabytes())).get());
 
-    // Add in any default ContainerInfo.
-    if (!executor.has_container() && flags.default_container_info.isSome()) {
-      executor.mutable_container()->CopyFrom(
-          flags.default_container_info.get());
-    }
-
     return executor;
   }
 
-  ExecutorInfo executor = task.executor();
-
-  // Add in any default ContainerInfo.
-  if (!executor.has_container() && flags.default_container_info.isSome()) {
-    executor.mutable_container()->CopyFrom(flags.default_container_info.get());
-  }
-
-  return executor;
+  return task.executor();
 }
 
 
@@ -4127,17 +4211,21 @@ void Slave::recoverFramework(const FrameworkState& state)
 
   CHECK(!frameworks.contains(state.id));
 
-  // Merge state.id into state.info.
   CHECK_SOME(state.info);
   FrameworkInfo frameworkInfo = state.info.get();
-  if (!frameworkInfo.has_id()) {
-    frameworkInfo.mutable_id()->MergeFrom(state.id);
-  } else {
-    CHECK_EQ(frameworkInfo.id(), state.id);
+  CHECK(frameworkInfo.has_id());
+
+  // In 0.24.0, HTTP schedulers are supported and these do not
+  // have a 'pid'. In this case, the slave will checkpoint UPID().
+  CHECK_SOME(state.pid);
+
+  Option<UPID> pid = state.pid.get();
+
+  if (pid.get() == UPID()) {
+    pid = None();
   }
 
-  CHECK_SOME(state.pid);
-  Framework* framework = new Framework(this, frameworkInfo, state.pid.get());
+  Framework* framework = new Framework(this, frameworkInfo, pid);
   frameworks[framework->id()] = framework;
 
   // Now recover the executors for this framework.
@@ -4176,7 +4264,7 @@ Future<Nothing> Slave::garbageCollect(const string& path)
 
 void Slave::forwardOversubscribed()
 {
-  LOG(INFO) << "Querying resource estimator for oversubscribable resources";
+  VLOG(1) << "Querying resource estimator for oversubscribable resources";
 
   resourceEstimator->oversubscribable()
     .onAny(defer(self(), &Self::_forwardOversubscribed, lambda::_1));
@@ -4190,8 +4278,8 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
                << (oversubscribable.isFailed()
                    ? oversubscribable.failure() : "future discarded");
   } else {
-    LOG(INFO) << "Received oversubscribable resources "
-              << oversubscribable.get() << " from the resource estimator";
+    VLOG(1) << "Received oversubscribable resources "
+            << oversubscribable.get() << " from the resource estimator";
 
     // Calculate the latest allocation of oversubscribed resources.
     // Note that this allocation value might be different from the
@@ -4317,10 +4405,21 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
         continue;
       }
 
+      const ContainerID containerId =
+          kill.has_container_id() ? kill.container_id() : executor->containerId;
+      if (containerId != executor->containerId) {
+        LOG(WARNING) << "Ignoring QoS correction KILL on container '"
+                     << containerId << "' for executor '"
+                     << executorId << "' of framework " << frameworkId
+                     << ": container cannot be found";
+        continue;
+      }
+
       switch (executor->state) {
         case Executor::REGISTERING:
         case Executor::RUNNING: {
-          LOG(INFO) << "Killing executor '" << executorId
+          LOG(INFO) << "Killing container '" << containerId
+                    << "' for executor '" << executorId
                     << "' of framework " << frameworkId
                     << " as QoS correction";
 
@@ -4333,7 +4432,9 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
           // (MESOS-2875).
           executor->state = Executor::TERMINATING;
           executor->reason = TaskStatus::REASON_EXECUTOR_PREEMPTED;
-          containerizer->destroy(executor->containerId);
+          containerizer->destroy(containerId);
+
+          ++metrics.executors_preempted;
           break;
         }
         case Executor::TERMINATING:
@@ -4370,10 +4471,22 @@ Future<ResourceUsage> Slave::usage()
       ResourceUsage::Executor* entry = usage->add_executors();
       entry->mutable_executor_info()->CopyFrom(executor->info);
       entry->mutable_allocated()->CopyFrom(executor->resources);
+      entry->mutable_container_id()->CopyFrom(executor->containerId);
 
       futures.push_back(containerizer->usage(executor->containerId));
     }
   }
+
+  Try<Resources> totalResources = applyCheckpointedResources(
+      info.resources(),
+      checkpointedResources);
+
+  CHECK_SOME(totalResources)
+    << "Failed to apply checkpointed resources "
+    << checkpointedResources << " to slave's resources "
+    << info.resources();
+
+  usage->mutable_total()->CopyFrom(totalResources.get());
 
   return await(futures).then(
       [usage](const list<Future<ResourceStatistics>>& futures) {
@@ -4645,7 +4758,7 @@ double Slave::_resources_revocable_percent(const string& name)
 Framework::Framework(
     Slave* _slave,
     const FrameworkInfo& _info,
-    const UPID& _pid)
+    const Option<UPID>& _pid)
   : state(RUNNING),
     slave(_slave),
     info(_info),
@@ -4658,15 +4771,21 @@ Framework::Framework(
         slave->metaDir, slave->info.id(), id());
 
     VLOG(1) << "Checkpointing FrameworkInfo to '" << path << "'";
+
     CHECK_SOME(state::checkpoint(path, info));
 
-    // Checkpoint the framework pid.
+    // Checkpoint the framework pid, note that we checkpoint a
+    // UPID() when it is None (for HTTP schedulers) because
+    // 0.23.x slaves consider a missing pid file to be an
+    // error.
     path = paths::getFrameworkPidPath(
         slave->metaDir, slave->info.id(), id());
 
-    VLOG(1) << "Checkpointing framework pid '"
-            << pid << "' to '" << path << "'";
-    CHECK_SOME(state::checkpoint(path, pid));
+    VLOG(1) << "Checkpointing framework pid"
+            << " '" << pid.getOrElse(UPID()) << "'"
+            << " to '" << path << "'";
+
+    CHECK_SOME(state::checkpoint(path, pid.getOrElse(UPID())));
   }
 }
 
@@ -5186,7 +5305,7 @@ bool Executor::isCommandExecutor() const
 }
 
 
-std::ostream& operator << (std::ostream& stream, Slave::State state)
+std::ostream& operator<<(std::ostream& stream, Slave::State state)
 {
   switch (state) {
     case Slave::RECOVERING:   return stream << "RECOVERING";
@@ -5198,7 +5317,7 @@ std::ostream& operator << (std::ostream& stream, Slave::State state)
 }
 
 
-std::ostream& operator << (std::ostream& stream, Framework::State state)
+std::ostream& operator<<(std::ostream& stream, Framework::State state)
 {
   switch (state) {
     case Framework::RUNNING:     return stream << "RUNNING";
@@ -5208,7 +5327,7 @@ std::ostream& operator << (std::ostream& stream, Framework::State state)
 }
 
 
-std::ostream& operator << (std::ostream& stream, Executor::State state)
+std::ostream& operator<<(std::ostream& stream, Executor::State state)
 {
   switch (state) {
     case Executor::REGISTERING: return stream << "REGISTERING";

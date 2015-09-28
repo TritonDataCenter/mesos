@@ -51,6 +51,100 @@ static bool invalid(char c)
   return iscntrl(c) || c == '/' || c == '\\';
 }
 
+
+namespace scheduler {
+namespace call {
+
+Option<Error> validate(const mesos::scheduler::Call& call)
+{
+  if (!call.IsInitialized()) {
+    return Error("Not initialized: " + call.InitializationErrorString());
+  }
+
+  if (call.type() == mesos::scheduler::Call::SUBSCRIBE) {
+    if (!call.has_subscribe()) {
+      return Error("Expecting 'subscribe' to be present");
+    }
+
+    if (!(call.subscribe().framework_info().id() == call.framework_id())) {
+      return Error("'framework_id' differs from 'subscribe.framework_info.id'");
+    }
+
+    return None();
+  }
+
+  // All calls except SUBSCRIBE should have framework id set.
+  if (!call.has_framework_id()) {
+    return Error("Expecting 'framework_id' to be present");
+  }
+
+  switch (call.type()) {
+    case mesos::scheduler::Call::TEARDOWN:
+      return None();
+
+    case mesos::scheduler::Call::ACCEPT:
+      if (!call.has_accept()) {
+        return Error("Expecting 'accept' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::DECLINE:
+      if (!call.has_decline()) {
+        return Error("Expecting 'decline' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::REVIVE:
+      return None();
+
+    case mesos::scheduler::Call::SUPPRESS:
+      return None();
+
+    case mesos::scheduler::Call::KILL:
+      if (!call.has_kill()) {
+        return Error("Expecting 'kill' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::SHUTDOWN:
+      if (!call.has_shutdown()) {
+        return Error("Expecting 'shutdown' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::ACKNOWLEDGE:
+      if (!call.has_acknowledge()) {
+        return Error("Expecting 'acknowledge' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::RECONCILE:
+      if (!call.has_reconcile()) {
+        return Error("Expecting 'reconcile' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::MESSAGE:
+      if (!call.has_message()) {
+        return Error("Expecting 'message' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::REQUEST:
+      if (!call.has_request()) {
+        return Error("Expecting 'request' to be present");
+      }
+      return None();
+
+    default:
+      return Error("Unknown call type");
+  }
+}
+
+} // namespace call {
+} // namespace scheduler {
+
+
 namespace resource {
 
 // Validates the ReservationInfos specified in the given resources (if
@@ -577,7 +671,7 @@ namespace operation {
 
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const string& role,
+    const Option<string>& role,
     const Option<string>& principal)
 {
   Option<Error> error = resource::validate(reserve.resources());
@@ -586,7 +680,7 @@ Option<Error> validate(
   }
 
   if (principal.isNone()) {
-    return Error("A framework without a principal cannot reserve resources.");
+    return Error("Cannot reserve resources without a principal.");
   }
 
   foreach (const Resource& resource, reserve.resources()) {
@@ -595,18 +689,18 @@ Option<Error> validate(
           "Resource " + stringify(resource) + " is not dynamically reserved");
     }
 
-    if (resource.role() != role) {
+    if (role.isSome() && resource.role() != role.get()) {
       return Error(
           "The reserved resource's role '" + resource.role() +
-          "' does not match the framework's role '" + role + "'");
+          "' does not match the framework's role '" + role.get() + "'");
     }
 
     if (resource.reservation().principal() != principal.get()) {
       return Error(
           "The reserved resource's principal '" +
-          stringify(resource.reservation().principal()) +
-          "' does not match the framework's principal '" +
-          stringify(principal.get()) + "'");
+          resource.reservation().principal() +
+          "' does not match the principal '" +
+          principal.get() + "'");
     }
 
     // NOTE: This check would be covered by 'contains' since there
@@ -633,7 +727,7 @@ Option<Error> validate(
   }
 
   if (!hasPrincipal) {
-    return Error("A framework without a principal cannot unreserve resources.");
+    return Error("Resources cannot be unreserved without a principal.");
   }
 
   // NOTE: We don't check that 'FrameworkInfo.principal' matches

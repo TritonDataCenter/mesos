@@ -29,6 +29,8 @@
 
 #include <mesos/module/allocator.hpp>
 
+#include <mesos/scheduler/scheduler.hpp>
+
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
@@ -93,7 +95,7 @@ TYPED_TEST(MasterAllocatorTest, SingleFramework)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -101,7 +103,7 @@ TYPED_TEST(MasterAllocatorTest, SingleFramework)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:2;mem:1024;disk:0");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave>> slave = this->StartSlave(flags);
   ASSERT_SOME(slave);
@@ -139,7 +141,7 @@ TYPED_TEST(MasterAllocatorTest, ResourcesUnused)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -149,7 +151,7 @@ TYPED_TEST(MasterAllocatorTest, ResourcesUnused)
   slave::Flags flags1 = this->CreateSlaveFlags();
   flags1.resources = Some("cpus:2;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave1 = this->StartSlave(&exec, flags1);
   ASSERT_SOME(slave1);
@@ -195,8 +197,7 @@ TYPED_TEST(MasterAllocatorTest, ResourcesUnused)
   // expected offer.
   AWAIT_READY(recoverResources);
 
-  FrameworkInfo frameworkInfo2; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.set_user("user2");
   frameworkInfo2.set_name("framework2");
 
@@ -245,7 +246,7 @@ TYPED_TEST(MasterAllocatorTest, OutOfOrderDispatch)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -253,13 +254,12 @@ TYPED_TEST(MasterAllocatorTest, OutOfOrderDispatch)
   slave::Flags flags1 = this->CreateSlaveFlags();
   flags1.resources = Some("cpus:2;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave1 = this->StartSlave(flags1);
   ASSERT_SOME(slave1);
 
-  FrameworkInfo frameworkInfo1; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo1.set_user("user1");
   frameworkInfo1.set_name("framework1");
 
@@ -327,8 +327,7 @@ TYPED_TEST(MasterAllocatorTest, OutOfOrderDispatch)
   // TODO(benh): Seems like we should wait for the above
   // recoverResources to be executed.
 
-  FrameworkInfo frameworkInfo2; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.set_user("user2");
   frameworkInfo2.set_name("framework2");
 
@@ -375,7 +374,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -385,13 +384,12 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:3;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave = this->StartSlave(&exec, flags);
   ASSERT_SOME(slave);
 
-  FrameworkInfo frameworkInfo1; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo1.set_name("framework1");
   frameworkInfo1.set_user("user1");
   frameworkInfo1.set_failover_timeout(10);
@@ -440,7 +438,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
   // When we shut down the first framework, we don't want it to tell
   // the master it's shutting down so that the master will wait to see
   // if it fails over.
-  DROP_PROTOBUFS(UnregisterFrameworkMessage(), _, _);
+  DROP_CALLS(mesos::scheduler::Call(), mesos::scheduler::Call::TEARDOWN, _, _);
 
   Future<Nothing> deactivateFramework;
   EXPECT_CALL(allocator, deactivateFramework(_))
@@ -451,8 +449,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
 
   AWAIT_READY(deactivateFramework);
 
-  FrameworkInfo frameworkInfo2; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.mutable_id()->MergeFrom(frameworkId);
 
   // Now launch the second (i.e., failover) scheduler using the
@@ -499,18 +496,15 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
   Try<PID<Master>> master = this->StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
 
-  ExecutorInfo executor1; // Bug in gcc 4.1.*, must assign on next line.
-  executor1 = CREATE_EXECUTOR_INFO("executor-1", "exit 1");
-
-  ExecutorInfo executor2; // Bug in gcc 4.1.*, must assign on next line.
-  executor2 = CREATE_EXECUTOR_INFO("executor-2", "exit 1");
+  ExecutorInfo executor1 = CREATE_EXECUTOR_INFO("executor-1", "exit 1");
+  ExecutorInfo executor2 = CREATE_EXECUTOR_INFO("executor-2", "exit 1");
 
   MockExecutor exec1(executor1.executor_id());
   MockExecutor exec2(executor2.executor_id());
@@ -524,7 +518,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:3;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave = this->StartSlave(&containerizer, flags);
   ASSERT_SOME(slave);
@@ -648,7 +642,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -658,7 +652,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
   slave::Flags flags1 = this->CreateSlaveFlags();
   flags1.resources = Some("cpus:2;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave1 = this->StartSlave(&exec, flags1);
   ASSERT_SOME(slave1);
@@ -725,7 +719,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
   slave::Flags flags2 = this->CreateSlaveFlags();
   flags2.resources = string("cpus:3;mem:256;disk:1024;ports:[31000-32000]");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   // Eventually after slave2 is launched, we should get
   // an offer that contains all of slave2's resources
@@ -763,7 +757,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -775,7 +769,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
   slave::Flags flags1 = this->CreateSlaveFlags();
   flags1.resources = Some("cpus:3;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave1 = this->StartSlave(&exec, flags1);
   ASSERT_SOME(slave1);
@@ -824,7 +818,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
   slave::Flags flags2 = this->CreateSlaveFlags();
   flags2.resources = Some("cpus:4;mem:2048");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   // After slave2 launches, all of its resources are combined with the
   // resources on slave1 that the task isn't using.
@@ -857,7 +851,7 @@ TYPED_TEST(MasterAllocatorTest, TaskFinished)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -869,7 +863,7 @@ TYPED_TEST(MasterAllocatorTest, TaskFinished)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:3;mem:1024");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave = this->StartSlave(&exec, flags);
   ASSERT_SOME(slave);
@@ -958,7 +952,7 @@ TYPED_TEST(MasterAllocatorTest, CpusOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -971,7 +965,7 @@ TYPED_TEST(MasterAllocatorTest, CpusOnlyOfferedAndTaskLaunched)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:2;mem:0");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave = this->StartSlave(&exec, flags);
   ASSERT_SOME(slave);
@@ -1036,7 +1030,7 @@ TYPED_TEST(MasterAllocatorTest, MemoryOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1049,7 +1043,7 @@ TYPED_TEST(MasterAllocatorTest, MemoryOnlyOfferedAndTaskLaunched)
   slave::Flags flags = this->CreateSlaveFlags();
   flags.resources = Some("cpus:0;mem:200");
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave> > slave = this->StartSlave(&exec, flags);
   ASSERT_SOME(slave);
@@ -1127,7 +1121,7 @@ TYPED_TEST(MasterAllocatorTest, Whitelist)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Future<Nothing> updateWhitelist1;
   EXPECT_CALL(allocator, updateWhitelist(Option<hashset<string>>(hosts)))
@@ -1167,7 +1161,7 @@ TYPED_TEST(MasterAllocatorTest, RoleTest)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.roles = Some("role2");
@@ -1176,8 +1170,7 @@ TYPED_TEST(MasterAllocatorTest, RoleTest)
 
   // Launch a framework with a role that doesn't exist to see that it
   // receives an error message.
-  FrameworkInfo frameworkInfo1; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo1.set_name("framework1");
   frameworkInfo1.set_user("user1");
   frameworkInfo1.set_role("role1");
@@ -1196,8 +1189,7 @@ TYPED_TEST(MasterAllocatorTest, RoleTest)
   AWAIT_READY(errorMessage);
 
   // Launch a framework under an existing role to see that it registers.
-  FrameworkInfo frameworkInfo2; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.set_name("framework2");
   frameworkInfo2.set_user("user2");
   frameworkInfo2.set_role("role2");
@@ -1261,14 +1253,14 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _));
 
     Try<PID<Master>> master = this->StartMaster(&allocator);
     ASSERT_SOME(master);
     slaveDetector.appoint(master.get());
     schedulerDetector.appoint(master.get());
 
-    EXPECT_CALL(allocator, addSlave(_, _, _, _));
+    EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
     slave::Flags flags = this->CreateSlaveFlags();
     flags.resources = Some("cpus:2;mem:1024");
@@ -1319,7 +1311,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _));
 
     Future<Nothing> addFramework;
     EXPECT_CALL(allocator2, addFramework(_, _, _))
@@ -1338,7 +1330,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
 
     AWAIT_READY(addFramework);
 
-    EXPECT_CALL(allocator2, addSlave(_, _, _, _));
+    EXPECT_CALL(allocator2, addSlave(_, _, _, _, _));
 
     Future<vector<Offer>> resourceOffers2;
     EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1386,14 +1378,14 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _));
 
     Try<PID<Master>> master = this->StartMaster(&allocator);
     ASSERT_SOME(master);
     slaveDetector.appoint(master.get());
     schedulerDetector.appoint(master.get());
 
-    EXPECT_CALL(allocator, addSlave(_, _, _, _));
+    EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
     slave::Flags flags = this->CreateSlaveFlags();
     flags.resources = Some("cpus:2;mem:1024");
@@ -1443,10 +1435,10 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _));
 
     Future<Nothing> addSlave;
-    EXPECT_CALL(allocator2, addSlave(_, _, _, _))
+    EXPECT_CALL(allocator2, addSlave(_, _, _, _, _))
       .WillOnce(DoAll(InvokeAddSlave(&allocator2),
                       FutureSatisfy(&addSlave)));
 

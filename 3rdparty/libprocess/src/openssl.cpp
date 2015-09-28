@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include "openssl.hpp"
 
 #include <sys/param.h>
@@ -9,6 +23,7 @@
 
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <process/once.hpp>
 
@@ -91,10 +106,9 @@ Flags::Flags()
       "AES128-SHA:AES256-SHA:RC4-SHA:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA:"
       "DHE-RSA-AES256-SHA:DHE-DSS-AES256-SHA");
 
-  add(&Flags::enable_ssl_v2,
-      "enable_ssl_v2",
-      "Enable SSLV2.",
-      false);
+  // We purposely don't have a flag for SSLv2. We do this because most
+  // systems have disabled SSLv2 at compilation due to having so many
+  // security vulnerabilities.
 
   add(&Flags::enable_ssl_v3,
       "enable_ssl_v3",
@@ -154,13 +168,14 @@ void locking_function(int mode, int n, const char* /*file*/, int /*line*/)
 // OpenSSL threading.
 unsigned long id_function()
 {
-  pthread_t pthread = pthread_self();
-#ifdef __APPLE__
-  mach_port_t id = pthread_mach_thread_np(pthread);
-#else
-  pthread_t id = pthread;
-#endif // __APPLE__
-  return static_cast<unsigned long>(id);
+  static_assert(sizeof(std::thread::id) == sizeof(unsigned long),
+                "sizeof(std::thread::id) must be equal to sizeof(unsigned long)"
+                " for std::thread::id to be used as a function for determining "
+                "a thread id");
+
+  // We use the std::thread id and convert it to an unsigned long.
+  const std::thread::id id = std::this_thread::get_id();
+  return *reinterpret_cast<const unsigned long*>(&id);
 }
 
 
@@ -315,6 +330,8 @@ void reinitialize()
     ctx = NULL;
   }
 
+  // Replace with `TLS_method` once our minimum OpenSSL version
+  // supports it.
   ctx = SSL_CTX_new(SSLv23_method());
   CHECK(ctx) << "Failed to create SSL context: "
              << ERR_error_string(ERR_get_error(), NULL);
@@ -476,8 +493,12 @@ void reinitialize()
 
   // Use server preference for cipher.
   long ssl_options = SSL_OP_CIPHER_SERVER_PREFERENCE;
-  // Disable SSLv2.
-  if (!ssl_flags->enable_ssl_v2) { ssl_options |= SSL_OP_NO_SSLv2; }
+
+  // Always disable SSLv2. We do this because most systems have
+  // disabled SSLv2 at compilation due to having so many security
+  // vulnerabilities.
+  ssl_options |= SSL_OP_NO_SSLv2;
+
   // Disable SSLv3.
   if (!ssl_flags->enable_ssl_v3) { ssl_options |= SSL_OP_NO_SSLv3; }
   // Disable TLSv1.

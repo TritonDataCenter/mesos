@@ -21,21 +21,20 @@
 
 #include <set>
 
-#include <mesos/slave/isolator.hpp>
-
 #include <process/time.hpp>
 
 #include <stout/hashmap.hpp>
-
-#include "linux/perf.hpp"
+#include <stout/nothing.hpp>
 
 #include "slave/flags.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-class CgroupsPerfEventIsolatorProcess : public mesos::slave::IsolatorProcess
+class CgroupsPerfEventIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
@@ -43,21 +42,20 @@ public:
   virtual ~CgroupsPerfEventIsolatorProcess();
 
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(
@@ -75,8 +73,12 @@ protected:
 
 private:
   CgroupsPerfEventIsolatorProcess(
-      const Flags& flags,
-      const std::string& hierarchy);
+      const Flags& _flags,
+      const std::string& _hierarchy,
+      const std::set<std::string>& _events)
+    : flags(_flags),
+      hierarchy(_hierarchy),
+      events(_events) {}
 
   void sample();
 
@@ -110,9 +112,11 @@ private:
 
   // The path to the cgroups subsystem hierarchy root.
   const std::string hierarchy;
+
   // Set of events to sample.
   std::set<std::string> events;
 
+  // TODO(jieyu): Use Owned<Info>.
   hashmap<ContainerID, Info*> infos;
 };
 

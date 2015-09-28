@@ -35,6 +35,8 @@
 
 #include "common/status_utils.hpp"
 
+#include "hook/manager.hpp"
+
 #ifdef __linux__
 #include "linux/cgroups.hpp"
 #endif // __linux__
@@ -121,7 +123,7 @@ Try<DockerContainerizer*> DockerContainerizer::create(
     const Flags& flags,
     Fetcher* fetcher)
 {
-  Try<Docker*> create = Docker::create(flags.docker);
+  Try<Docker*> create = Docker::create(flags.docker, flags.docker_socket, true);
   if (create.isError()) {
     return Error("Failed to create docker: " + create.error());
   }
@@ -129,18 +131,10 @@ Try<DockerContainerizer*> DockerContainerizer::create(
   Shared<Docker> docker(create.get());
 
   if (flags.docker_mesos_image.isSome()) {
-    Future<Version> version = docker->version();
-    if (!version.await(DOCKER_VERSION_WAIT_TIMEOUT)) {
-      return Error("Timed out waiting for docker version");
-    }
-
-    if (version.isFailed()) {
-      return Error(version.failure());
-    }
-
-    if (version.get() < Version(1, 5, 0)) {
-      string message = "Docker with mesos images requires docker 1.5+, found ";
-      message += stringify(version.get());
+    Try<Nothing> validateResult = docker->validateVersion(Version(1, 5, 0));
+    if (validateResult.isError()) {
+      string message = "Docker with mesos images requires docker 1.5+";
+      message += validateResult.error();
       return Error(message);
     }
   }
@@ -183,8 +177,9 @@ docker::Flags dockerFlags(
   dockerFlags.container = name;
   dockerFlags.docker = flags.docker;
   dockerFlags.sandbox_directory = directory;
-  dockerFlags.mapped_directory = flags.docker_sandbox_directory;
+  dockerFlags.mapped_directory = flags.sandbox_directory;
   dockerFlags.stop_timeout = flags.docker_stop_timeout;
+  dockerFlags.docker_socket = flags.docker_socket;
   return dockerFlags;
 }
 
@@ -302,7 +297,8 @@ DockerContainerizerProcess::Container::create(
         slaveId,
         slavePid,
         checkpoint,
-        flags);
+        flags,
+        false);
     launchesExecutorContainer = true;
   }
 
@@ -772,6 +768,19 @@ Future<bool> DockerContainerizerProcess::launch(
               << "' and framework '" << executorInfo.framework_id() << "'";
   }
 
+  if (HookManager::hooksAvailable()) {
+    HookManager::slavePreLaunchDockerHook(
+        container.get()->container,
+        container.get()->command,
+        taskInfo,
+        executorInfo,
+        container.get()->name(),
+        container.get()->directory,
+        flags.sandbox_directory,
+        container.get()->resources,
+        container.get()->environment);
+  }
+
   if (taskInfo.isSome() && flags.docker_mesos_image.isNone()) {
     // Launching task by forking a subprocess to run docker executor.
     return container.get()->launch = fetch(containerId, slaveId)
@@ -825,15 +834,15 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
   // This executor could either be a custom executor specified by an
   // ExecutorInfo, or the docker executor.
   Future<Nothing> run = docker->run(
-    container->container,
-    container->command,
-    containerName,
-    container->directory,
-    flags.docker_sandbox_directory,
-    container->resources,
-    container->environment,
-    path::join(container->directory, "stdout"),
-    path::join(container->directory, "stderr"));
+      container->container,
+      container->command,
+      containerName,
+      container->directory,
+      flags.sandbox_directory,
+      container->resources,
+      container->environment,
+      path::join(container->directory, "stdout"),
+      path::join(container->directory, "stderr"));
 
   Owned<Promise<Docker::Container>> promise(new Promise<Docker::Container>());
   // We like to propogate the run failure when run fails so slave can
@@ -875,7 +884,8 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
       container->slaveId,
       container->slavePid,
       container->checkpoint,
-      flags);
+      flags,
+      false);
 
   // Include any enviroment variables from ExecutorInfo.
   foreach (const Environment::Variable& variable,
@@ -1200,71 +1210,135 @@ Future<ResourceStatistics> DockerContainerizerProcess::usage(
     return Failure("Container is being removed: " + stringify(containerId));
   }
 
+  auto collectUsage = [this, containerId](
+      pid_t pid) -> Future<ResourceStatistics> {
+    // First make sure container is still there.
+    if (!containers_.contains(containerId)) {
+      return Failure("Container has been destroyed: " + stringify(containerId));
+    }
+
+    Container* container = containers_[containerId];
+
+    if (container->state == Container::DESTROYING) {
+      return Failure("Container is being removed: " + stringify(containerId));
+    }
+
+    const Try<ResourceStatistics> cgroupStats = cgroupsStatistics(pid);
+    if (cgroupStats.isError()) {
+      return Failure("Failed to collect cgroup stats: " + cgroupStats.error());
+    }
+
+    ResourceStatistics result = cgroupStats.get();
+
+    // Set the resource allocations.
+    const Resources& resource = container->resources;
+    const Option<Bytes> mem = resource.mem();
+    if (mem.isSome()) {
+      result.set_mem_limit_bytes(mem.get().bytes());
+    }
+
+    const Option<double> cpus = resource.cpus();
+    if (cpus.isSome()) {
+      result.set_cpus_limit(cpus.get());
+    }
+
+    return result;
+  };
+
   // Skip inspecting the docker container if we already have the pid.
   if (container->pid.isSome()) {
-    return __usage(containerId, container->pid.get());
+    return collectUsage(container->pid.get());
   }
 
   return docker->inspect(container->name())
-    .then(defer(self(), &Self::_usage, containerId, lambda::_1));
+    .then(defer(
+      self(),
+      [this, containerId, collectUsage]
+        (const Docker::Container& _container) -> Future<ResourceStatistics> {
+        const Option<pid_t> pid = _container.pid;
+        if (pid.isNone()) {
+          return Failure("Container is not running");
+        }
+
+        if (!containers_.contains(containerId)) {
+          return Failure(
+            "Container has been destroyed:" + stringify(containerId));
+        }
+
+        Container* container = containers_[containerId];
+
+        // Update the container's pid now. We ran inspect because we didn't have
+        // a pid for the container.
+        container->pid = pid;
+
+        return collectUsage(pid.get());
+      }));
 #endif // __linux__
 }
 
 
-Future<ResourceStatistics> DockerContainerizerProcess::_usage(
-    const ContainerID& containerId,
-    const Docker::Container& _container)
+Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
+    pid_t pid) const
 {
-  if (!containers_.contains(containerId)) {
-    return Failure("Container has been destroyed:" + stringify(containerId));
+#ifndef __linux__
+  return Error("Does not support cgroups on non-linux platform");
+#else
+  const Result<string> cpuHierarchy = cgroups::hierarchy("cpuacct");
+  const Result<string> memHierarchy = cgroups::hierarchy("memory");
+
+  if (cpuHierarchy.isError()) {
+    return Error(
+        "Failed to determine the cgroup 'cpu' subsystem hierarchy: " +
+        cpuHierarchy.error());
   }
 
-  Container* container = containers_[containerId];
-
-  if (container->state == Container::DESTROYING) {
-    return Failure("Container is being removed: " + stringify(containerId));
+  if (memHierarchy.isError()) {
+    return Error(
+        "Failed to determine the cgroup 'memory' subsystem hierarchy: " +
+        memHierarchy.error());
   }
 
-  Option<pid_t> pid = _container.pid;
-  if (pid.isNone()) {
-    return Failure("Container is not running");
+  const Result<string> cpuCgroup = cgroups::cpuacct::cgroup(pid);
+  if (cpuCgroup.isError()) {
+    return Error(
+        "Failed to determine cgroup for the 'cpu' subsystem: " +
+        cpuCgroup.error());
   }
 
-  container->pid = pid;
-
-  return __usage(containerId, pid.get());
-}
-
-
-Future<ResourceStatistics> DockerContainerizerProcess::__usage(
-    const ContainerID& containerId,
-    pid_t pid)
-{
-  Container* container = containers_[containerId];
-
-  // Note that here getting the root pid is enough because
-  // the root process acts as an 'init' process in the docker
-  // container, so no other child processes will escape it.
-  Try<ResourceStatistics> statistics = mesos::internal::usage(pid, true, true);
-  if (statistics.isError()) {
-    return Failure(statistics.error());
+  const Result<string> memCgroup = cgroups::memory::cgroup(pid);
+  if (memCgroup.isError()) {
+    return Error(
+        "Failed to determine cgroup for the 'memory' subsystem: " +
+        memCgroup.error());
   }
 
-  ResourceStatistics result = statistics.get();
+  const Try<cgroups::cpuacct::Stats> cpuAcctStat =
+    cgroups::cpuacct::stat(cpuHierarchy.get(), cpuCgroup.get());
 
-  // Set the resource allocations.
-  const Resources& resource = container->resources;
-  Option<Bytes> mem = resource.mem();
-  if (mem.isSome()) {
-    result.set_mem_limit_bytes(mem.get().bytes());
+  if (cpuAcctStat.isError()) {
+    return Error("Failed to get cpu.stat: " + cpuAcctStat.error());
   }
 
-  Option<double> cpus = resource.cpus();
-  if (cpus.isSome()) {
-    result.set_cpus_limit(cpus.get());
+  const Try<hashmap<string, uint64_t>> memStats =
+    cgroups::stat(memHierarchy.get(), memCgroup.get(), "memory.stat");
+
+  if (memStats.isError()) {
+    return Error(
+        "Error getting memory statistics from cgroups memory subsystem: " +
+        memStats.error());
   }
+
+  if (!memStats.get().contains("rss")) {
+    return Error("cgroups memory stats does not contain 'rss' data");
+  }
+
+  ResourceStatistics result;
+  result.set_cpus_system_time_secs(cpuAcctStat.get().system.secs());
+  result.set_cpus_user_time_secs(cpuAcctStat.get().user.secs());
+  result.set_mem_rss_bytes(memStats.get().at("rss"));
 
   return result;
+#endif // __linux__
 }
 
 

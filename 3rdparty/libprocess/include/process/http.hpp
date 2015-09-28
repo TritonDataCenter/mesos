@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_HTTP_HPP__
 #define __PROCESS_HTTP_HPP__
 
@@ -48,9 +62,62 @@ extern hashmap<uint16_t, std::string> statuses;
 void initialize();
 
 
+// Represents a Uniform Resource Locator:
+//   scheme://domain|ip:port/path?query#fragment
+//
+// This is actually a URI-reference (see 4.1 of RFC 3986).
+//
+// TODO(bmahler): The default port should depend on the scheme!
+struct URL
+{
+  URL() = default;
+
+  URL(const std::string& _scheme,
+      const std::string& _domain,
+      const uint16_t _port = 80,
+      const std::string& _path = "/",
+      const hashmap<std::string, std::string>& _query =
+        (hashmap<std::string, std::string>()),
+      const Option<std::string>& _fragment = None())
+    : scheme(_scheme),
+      domain(_domain),
+      port(_port),
+      path(_path),
+      query(_query),
+      fragment(_fragment) {}
+
+  URL(const std::string& _scheme,
+      const net::IP& _ip,
+      const uint16_t _port = 80,
+      const std::string& _path = "/",
+      const hashmap<std::string, std::string>& _query =
+        (hashmap<std::string, std::string>()),
+      const Option<std::string>& _fragment = None())
+    : scheme(_scheme),
+      ip(_ip),
+      port(_port),
+      path(_path),
+      query(_query),
+      fragment(_fragment) {}
+
+  Option<std::string> scheme;
+
+  // TODO(benh): Consider using unrestricted union for 'domain' and 'ip'.
+  Option<std::string> domain;
+  Option<net::IP> ip;
+  Option<uint16_t> port;
+  std::string path;
+  hashmap<std::string, std::string> query;
+  Option<std::string> fragment;
+};
+
+
+std::ostream& operator<<(std::ostream& stream, const URL& url);
+
+
 struct CaseInsensitiveHash
 {
-  size_t operator () (const std::string& key) const
+  size_t operator()(const std::string& key) const
   {
     size_t seed = 0;
     foreach (char c, key) {
@@ -63,7 +130,7 @@ struct CaseInsensitiveHash
 
 struct CaseInsensitiveEqual
 {
-  bool operator () (const std::string& left, const std::string& right) const
+  bool operator()(const std::string& left, const std::string& right) const
   {
     if (left.size() != right.size()) {
       return false;
@@ -78,34 +145,48 @@ struct CaseInsensitiveEqual
 };
 
 
+typedef hashmap<std::string,
+                std::string,
+                CaseInsensitiveHash,
+                CaseInsensitiveEqual> Headers;
+
+
 struct Request
 {
-  // Contains the client's address. Note that this may
-  // correspond to a proxy or load balancer address.
-  network::Address client;
-
-  // TODO(benh): Add major/minor version.
-  hashmap<std::string,
-          std::string,
-          CaseInsensitiveHash,
-          CaseInsensitiveEqual> headers;
-
   std::string method;
 
-  // TODO(benh): Replace 'url', 'path', 'query', and 'fragment' with URL.
-  std::string url; // (path?query#fragment)
-  std::string path;
-  hashmap<std::string, std::string> query;
-  std::string fragment;
+  // TODO(benh): Add major/minor version.
+
+  // For client requests, the URL should be a URI.
+  // For server requests, the URL may be a URI or a relative reference.
+  URL url;
+
+  Headers headers;
+
+  // TODO(bmahler): Add a 'query' field which contains both
+  // the URL query and the parsed form data from the body.
 
   std::string body;
 
+  // TODO(bmahler): Ensure this is consistent with the 'Connection'
+  // header; perhaps make this a function that checks the header.
   bool keepAlive;
 
-  // Returns whether the encoding is considered acceptable in the request.
-  // TODO(bmahler): Consider this logic being in decoder.hpp, and having the
-  // Request contain a member variable for each popular HTTP 1.0/1.1 header.
-  bool accepts(const std::string& encoding) const;
+  // For server requests, this contains the address of the client.
+  // Note that this may correspond to a proxy or load balancer address.
+  network::Address client;
+
+  /**
+   * Returns whether the encoding is considered acceptable in the
+   * response. See RFC 2616 section 14.3 for details.
+   */
+  bool acceptsEncoding(const std::string& encoding) const;
+
+  /**
+   * Returns whether the media type is considered acceptable in the
+   * response. See RFC 2616, section 14.1 for the details.
+   */
+  bool acceptsMediaType(const std::string& mediaType) const;
 };
 
 
@@ -129,11 +210,11 @@ struct Request
 // reader must "keep up" with the writer in order to avoid
 // unbounded memory growth.
 //
-// TODO(bmahler): The writer needs to be able to induce a failure
-// on the reader to signal an error has occurred. For example, if
-// we are receiving a response but a disconnection occurs before
-// the response is completed, we want the reader to detect that a
-// disconnection occurred!
+// The writer can induce a failure on the reader in order to signal
+// that an error has occurred. For example, if we are receiving a
+// response but a disconnection occurs before the response is
+// completed, we want the reader to detect that a disconnection
+// occurred!
 //
 // TODO(bmahler): Consider aggregating writes into larger reads to
 // help the reader keep up (a process::Stream abstraction with
@@ -164,6 +245,10 @@ public:
     // or fails will notify the writer that the reader is no longer
     // interested. Returns false if the read-end was already closed.
     bool close();
+
+    // Comparison operators useful for checking connection equality.
+    bool operator==(const Reader& other) const { return data == other.data; }
+    bool operator!=(const Reader& other) const { return !(*this == other); }
 
   private:
     friend class Pipe;
@@ -200,8 +285,11 @@ public:
     // Returns Nothing when the read-end of the pipe is closed
     // before the write-end is closed, which means the reader
     // was unable to continue reading!
-    Future<Nothing> readerClosed();
+    Future<Nothing> readerClosed() const;
 
+    // Comparison operators useful for checking connection equality.
+    bool operator==(const Writer& other) const { return data == other.data; }
+    bool operator!=(const Writer& other) const { return !(*this == other); }
   private:
     friend class Pipe;
 
@@ -222,6 +310,9 @@ public:
   Reader reader() const;
   Writer writer() const;
 
+  // Comparison operators useful for checking connection equality.
+  bool operator==(const Pipe& other) const { return data == other.data; }
+  bool operator!=(const Pipe& other) const { return !(*this == other); }
 private:
   struct Data
   {
@@ -270,10 +361,7 @@ struct Response
   // TODO(benh): Add major/minor version.
   std::string status;
 
-  hashmap<std::string,
-          std::string,
-          CaseInsensitiveHash,
-          CaseInsensitiveEqual> headers;
+  Headers headers;
 
   // Either provide a 'body', an absolute 'path' to a file, or a
   // 'pipe' for streaming a response. Distinguish between the cases
@@ -296,7 +384,8 @@ struct Response
   // In all cases (BODY, PATH, PIPE), you are expected to properly
   // specify the 'Content-Type' header, but the 'Content-Length' and
   // or 'Transfer-Encoding' headers will be filled in for you.
-  enum {
+  enum
+  {
     NONE,
     BODY,
     PATH,
@@ -496,6 +585,20 @@ struct UnsupportedMediaType : Response
 };
 
 
+struct PreconditionFailed : Response
+{
+  PreconditionFailed()
+  {
+    status = "412 Precondition Failed";
+  }
+
+  explicit PreconditionFailed(const std::string& body) : Response(body)
+  {
+    status = "412 Precondition Failed";
+  }
+};
+
+
 struct InternalServerError : Response
 {
   InternalServerError()
@@ -506,6 +609,20 @@ struct InternalServerError : Response
   explicit InternalServerError(const std::string& body) : Response(body)
   {
     status = "500 Internal Server Error";
+  }
+};
+
+
+struct NotImplemented : Response
+{
+  NotImplemented()
+  {
+    status = "501 Not Implemented";
+  }
+
+  explicit NotImplemented(const std::string& body) : Response(body)
+  {
+    status = "501 Not Implemented";
   }
 };
 
@@ -598,64 +715,17 @@ std::string encode(const hashmap<std::string, std::string>& query);
 } // namespace query {
 
 
-// Represents a Uniform Resource Locator:
-//   scheme://domain|ip:port/path?query#fragment
-struct URL
-{
-  URL(const std::string& _scheme,
-      const std::string& _domain,
-      const uint16_t _port = 80,
-      const std::string& _path = "/",
-      const hashmap<std::string, std::string>& _query =
-        (hashmap<std::string, std::string>()),
-      const Option<std::string>& _fragment = None())
-    : scheme(_scheme),
-      domain(_domain),
-      port(_port),
-      path(_path),
-      query(_query),
-      fragment(_fragment) {}
-
-  URL(const std::string& _scheme,
-      const net::IP& _ip,
-      const uint16_t _port = 80,
-      const std::string& _path = "/",
-      const hashmap<std::string, std::string>& _query =
-        (hashmap<std::string, std::string>()),
-      const Option<std::string>& _fragment = None())
-    : scheme(_scheme),
-      ip(_ip),
-      port(_port),
-      path(_path),
-      query(_query),
-      fragment(_fragment) {}
-
-  std::string scheme;
-  // TODO(benh): Consider using unrestricted union for 'domain' and 'ip'.
-  Option<std::string> domain;
-  Option<net::IP> ip;
-  uint16_t port;
-  std::string path;
-  hashmap<std::string, std::string> query;
-  Option<std::string> fragment;
-};
-
-
-std::ostream& operator << (
-    std::ostream& stream,
-    const URL& url);
-
-
 // TODO(bmahler): Consolidate these functions into a single
 // http::request function that takes a 'Request' object.
 
+// TODO(joerg84): Make names consistent (see Mesos-3256).
 
 // Asynchronously sends an HTTP GET request to the specified URL
 // and returns the HTTP response of type 'BODY' once the entire
 // response is received.
 Future<Response> get(
     const URL& url,
-    const Option<hashmap<std::string, std::string>>& headers = None());
+    const Option<Headers>& headers = None());
 
 
 // Asynchronously sends an HTTP GET request to the process with the
@@ -665,7 +735,7 @@ Future<Response> get(
     const UPID& upid,
     const Option<std::string>& path = None(),
     const Option<std::string>& query = None(),
-    const Option<hashmap<std::string, std::string>>& headers = None());
+    const Option<Headers>& headers = None());
 
 
 // Asynchronously sends an HTTP POST request to the specified URL
@@ -673,7 +743,7 @@ Future<Response> get(
 // response is received.
 Future<Response> post(
     const URL& url,
-    const Option<hashmap<std::string, std::string>>& headers = None(),
+    const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
     const Option<std::string>& contentType = None());
 
@@ -684,9 +754,38 @@ Future<Response> post(
 Future<Response> post(
     const UPID& upid,
     const Option<std::string>& path = None(),
-    const Option<hashmap<std::string, std::string>>& headers = None(),
+    const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
     const Option<std::string>& contentType = None());
+
+
+/**
+ * Asynchronously sends an HTTP DELETE request to the process with the
+ * given UPID and returns the HTTP response.
+ *
+ * @param url The target url for the request.
+ * @param headers Optional header for the request.
+ * @return A future with the HTTP response.
+ */
+Future<Response> requestDelete(
+    const URL& url,
+    const Option<Headers>& headers = None());
+
+
+/**
+ * Asynchronously sends an HTTP DELETE request to the process with the
+ * given UPID and returns the HTTP response.
+ *
+ * @param upid The target process's assigned untyped PID.
+ * @param path The optional path to be be deleted. If not send the
+     request is send to the process directly.
+ * @param headers Optional headers for the request.
+ * @return A future with the HTTP response.
+ */
+Future<Response> requestDelete(
+    const UPID& upid,
+    const Option<std::string>& path = None(),
+    const Option<Headers>& headers = None());
 
 
 namespace streaming {
@@ -697,7 +796,7 @@ namespace streaming {
 // from the Pipe::Reader.
 Future<Response> get(
     const URL& url,
-    const Option<hashmap<std::string, std::string>>& headers = None());
+    const Option<Headers>& headers = None());
 
 // Asynchronously sends an HTTP GET request to the process with the
 // given UPID and returns the HTTP response of type 'PIPE' once the
@@ -707,7 +806,7 @@ Future<Response> get(
     const UPID& upid,
     const Option<std::string>& path = None(),
     const Option<std::string>& query = None(),
-    const Option<hashmap<std::string, std::string>>& headers = None());
+    const Option<Headers>& headers = None());
 
 // Asynchronously sends an HTTP POST request to the specified URL
 // and returns the HTTP response of type 'PIPE' once the response
@@ -715,7 +814,7 @@ Future<Response> get(
 // from the Pipe::Reader.
 Future<Response> post(
     const URL& url,
-    const Option<hashmap<std::string, std::string>>& headers = None(),
+    const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
     const Option<std::string>& contentType = None());
 
@@ -726,7 +825,7 @@ Future<Response> post(
 Future<Response> post(
     const UPID& upid,
     const Option<std::string>& path = None(),
-    const Option<hashmap<std::string, std::string>>& headers = None(),
+    const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
     const Option<std::string>& contentType = None());
 

@@ -20,6 +20,7 @@
 
 #include <sys/types.h>
 
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -31,13 +32,13 @@
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
+#include <process/latch.hpp>
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
 
 #include <stout/duration.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/hashset.hpp>
-#include <stout/fatal.hpp>
 #include <stout/numify.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -64,6 +65,7 @@ using namespace process;
 
 using std::string;
 
+using process::Latch;
 using process::wait; // Necessary on some OS's to disambiguate.
 
 
@@ -110,8 +112,8 @@ public:
                   const string& _directory,
                   bool _checkpoint,
                   Duration _recoveryTimeout,
-                  pthread_mutex_t* _mutex,
-                  pthread_cond_t* _cond)
+                  std::recursive_mutex* _mutex,
+                  Latch* _latch)
     : ProcessBase(ID::generate("executor")),
       slave(_slave),
       driver(_driver),
@@ -124,7 +126,7 @@ public:
       local(_local),
       aborted(false),
       mutex(_mutex),
-      cond(_cond),
+      latch(_latch),
       directory(_directory),
       checkpoint(_checkpoint),
       recoveryTimeout(_recoveryTimeout)
@@ -197,7 +199,7 @@ protected:
                   const SlaveID& slaveId,
                   const SlaveInfo& slaveInfo)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring registered message from slave " << slaveId
               << " because the driver is aborted!";
       return;
@@ -220,7 +222,7 @@ protected:
 
   void reregistered(const SlaveID& slaveId, const SlaveInfo& slaveInfo)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring re-registered message from slave " << slaveId
               << " because the driver is aborted!";
       return;
@@ -243,7 +245,7 @@ protected:
 
   void reconnect(const UPID& from, const SlaveID& slaveId)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring reconnect message from slave " << slaveId
               << " because the driver is aborted!";
       return;
@@ -279,7 +281,7 @@ protected:
 
   void runTask(const TaskInfo& task)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring run task message for task " << task.task_id()
               << " because the driver is aborted!";
       return;
@@ -304,7 +306,7 @@ protected:
 
   void killTask(const TaskID& taskId)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring kill task message for task " << taskId
               <<" because the driver is aborted!";
       return;
@@ -328,7 +330,7 @@ protected:
       const TaskID& taskId,
       const string& uuid)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring status update acknowledgement "
               << UUID::fromBytes(uuid) << " for task " << taskId
               << " of framework " << frameworkId
@@ -352,7 +354,7 @@ protected:
                         const ExecutorID& executorId,
                         const string& data)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring framework message because the driver is aborted!";
       return;
     }
@@ -371,7 +373,7 @@ protected:
 
   void shutdown()
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring shutdown message because the driver is aborted!";
       return;
     }
@@ -393,7 +395,7 @@ protected:
 
     VLOG(1) << "Executor::shutdown took " << stopwatch.elapsed();
 
-    aborted = true; // To make sure not to accept any new messages.
+    aborted.store(true); // To make sure not to accept any new messages.
 
     if (local) {
       terminate(this);
@@ -405,17 +407,17 @@ protected:
     terminate(self());
 
     synchronized (mutex) {
-      pthread_cond_signal(cond);
+      CHECK_NOTNULL(latch)->trigger();
     }
   }
 
   void abort()
   {
     LOG(INFO) << "Deactivating the executor libprocess";
-    CHECK(aborted);
+    CHECK(aborted.load());
 
     synchronized (mutex) {
-      pthread_cond_signal(cond);
+      CHECK_NOTNULL(latch)->trigger();
     }
   }
 
@@ -438,7 +440,7 @@ protected:
 
   virtual void exited(const UPID& pid)
   {
-    if (aborted) {
+    if (aborted.load()) {
       VLOG(1) << "Ignoring exited event because the driver is aborted!";
       return;
     }
@@ -477,7 +479,7 @@ protected:
 
     VLOG(1) << "Executor::shutdown took " << stopwatch.elapsed();
 
-    aborted = true; // To make sure not to accept any new messages.
+    aborted.store(true); // To make sure not to accept any new messages.
 
     // This is a pretty bad state ... no slave is left. Rather
     // than exit lets kill our process group (which includes
@@ -542,9 +544,9 @@ private:
   bool connected; // Registered with the slave.
   UUID connection; // UUID to identify the connection instance.
   bool local;
-  volatile bool aborted;
-  pthread_mutex_t* mutex;
-  pthread_cond_t* cond;
+  std::atomic_bool aborted;
+  std::recursive_mutex* mutex;
+  Latch* latch;
   const string directory;
   bool checkpoint;
   Duration recoveryTimeout;
@@ -583,13 +585,8 @@ MesosExecutorDriver::MesosExecutorDriver(Executor* _executor)
     return;
   }
 
-  // Create mutex and condition variable.
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-  pthread_cond_init(&cond, 0);
+  // Initialize Latch.
+  latch = new Latch();
 
   // Initialize libprocess.
   process::initialize();
@@ -612,8 +609,7 @@ MesosExecutorDriver::~MesosExecutorDriver()
   wait(process);
   delete process;
 
-  pthread_mutex_destroy(&mutex);
-  pthread_cond_destroy(&cond);
+  delete latch;
 }
 
 
@@ -686,7 +682,7 @@ Status MesosExecutorDriver::start()
     value = os::getenv("MESOS_CHECKPOINT");
     checkpoint = value.isSome() && value.get() == "1";
 
-    Duration recoveryTimeout = slave::RECOVERY_TIMEOUT;
+    Duration recoveryTimeout = RECOVERY_TIMEOUT;
 
     // Get the recovery timeout if checkpointing is enabled.
     if (checkpoint) {
@@ -717,7 +713,7 @@ Status MesosExecutorDriver::start()
         checkpoint,
         recoveryTimeout,
         &mutex,
-        &cond);
+        latch);
 
     spawn(process);
 
@@ -755,12 +751,11 @@ Status MesosExecutorDriver::abort()
 
     CHECK(process != NULL);
 
-    // We set the volatile aborted to true here to prevent any further
+    // We set the atomic aborted to true here to prevent any further
     // messages from being processed in the ExecutorProcess. However,
     // if abort() is called from another thread as the ExecutorProcess,
     // there may be at most one additional message processed.
-    // TODO(bmahler): Use an atomic boolean.
-    process->aborted = true;
+    process->aborted.store(true);
 
     // Dispatching here ensures that we still process the outstanding
     // requests *from* the executor, since those do proceed when
@@ -774,15 +769,20 @@ Status MesosExecutorDriver::abort()
 
 Status MesosExecutorDriver::join()
 {
+  // Exit early if the driver is not running.
   synchronized (mutex) {
     if (status != DRIVER_RUNNING) {
       return status;
     }
+  }
 
-    while (status == DRIVER_RUNNING) {
-      pthread_cond_wait(&cond, &mutex);
-    }
+  // If the driver was running, the latch will be triggered regardless
+  // of the current `status`. Wait for this to happen to signify
+  // termination.
+  CHECK_NOTNULL(latch)->await();
 
+  // Now return the current `status` of the driver.
+  synchronized (mutex) {
     CHECK(status == DRIVER_ABORTED || status == DRIVER_STOPPED);
 
     return status;

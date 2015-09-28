@@ -80,7 +80,7 @@ class Scheduler(object):
       Invoked when an offer is no longer valid (e.g., the slave was lost or
       another framework used resources in the offer.) If for whatever reason
       an offer is never rescinded (e.g., dropped message, failing over
-      framework, etc.), a framwork that attempts to launch tasks using an
+      framework, etc.), a framework that attempts to launch tasks using an
       invalid offer will receive TASK_LOST status updats for those tasks
       (see Scheduler.resourceOffers).
     """
@@ -228,6 +228,12 @@ class SchedulerDriver(object):
       Removes all filters previously set by the framework (via
       launchTasks()).  This enables the framework to receive offers from
       those filtered slaves.
+    """
+
+  def suppressOffers(self):
+    """
+      Inform Mesos master to stop sending offers to the framework. The
+      scheduler should call reviveOffers() to resume getting offers.
     """
 
   def acknowledgeStatusUpdate(self, status):

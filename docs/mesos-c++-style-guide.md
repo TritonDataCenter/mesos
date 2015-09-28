@@ -37,7 +37,6 @@ void Slave::statusUpdate(StatusUpdate update, const UPID& pid)
 
 ### Function Names
 * We use [lowerCamelCase](http://en.wikipedia.org/wiki/CamelCase#Variations_and_synonyms) for function names (Google uses mixed case for regular functions; and their accessors and mutators match the name of the variable).
-* Leave spaces around overloaded operators, e.g. `operator + (...);` rather than `operator+(...);`
 
 ### Namespace Names
 * We do not use namespace aliases.
@@ -47,17 +46,19 @@ void Slave::statusUpdate(StatusUpdate update, const UPID& pid)
 
 ## Comments
 * End each sentence within a comment with a punctuation mark (please note that we generally prefer periods); this applies to incomplete sentences as well.
-* At most 70 characters per line in comments.
 * For trailing comments, leave one space.
 
 ## Breaks
-* Break before braces on function, class, struct and union definitions. (Google attaches braces to the surrounding context)
+* Break before braces on enum, function, and record (i.e. struct, class, union) definitions.
 
 ## Indentation
 
 ### Class Format
 * Access modifiers are not indented (Google uses one space indentation).
 * Constructor initializers are indented by 2 spaces (Google indents by 4).
+
+### Templates
+* Leave one space after the `template` keyword, e.g. `template <typename T>` rather than `template<typename T>`.
 
 ### Function Definition/Invocation
 * Newline when calling or defining a function: indent with 4 spaces.
@@ -235,9 +236,9 @@ We support C++11 and require GCC 4.8+ or Clang 3.5+ compilers. The whitelist of 
 
 ~~~{.cpp}
 // 1: OK.
-const auto& i = values.find(keys.front());
+const auto i = values.find(keys.front());
 // Compare with
-const typename map::iterator& i = values.find(keys.front());
+const typename map::iterator i = values.find(keys.front());
 
 // 2: OK.
 auto names = shared_ptr<list<string>>(new list<string>());
@@ -258,6 +259,9 @@ Try<Owned<LocalAuthorizer>> authorizer = LocalAuthorizer::create();
   * `std::mutex`
   * `std::lock_guard<std::mutex>`
   * `std::unique_lock<std::mutex>`
+* Atomics (`std::atomic`)
+  * The standard defines a number of predefined typedefs for atomic types (e.g., `std::atomic_int`), in addition to `std::atomic<T>`. When a typedef is available, it should be preferred over explicit template specialization of `std::atomic<T>`.
+  * When reading from and writing to atomic values, the `load` and `store` member functions should be used instead of the overloads of `operator T()` and `operator=`. Being explicit helps to draw the reader's attention to the fact that atomic values are being manipulated.
 * Shared from this.
   * `class T : public std::enable_shared_from_this<T>`
   * `shared_from_this()`
@@ -364,7 +368,7 @@ instance.method([]() {
 });
 ~~~
 
-  * Wrap capture lists indepedently of parameters, *use the same formatting as if the capture list were template parameters*:
+  * Wrap capture lists independently of parameters, *use the same formatting as if the capture list were template parameters*:
 
 ~~~{.cpp}
 // 1: OK.
@@ -532,8 +536,9 @@ auto lambda = [
 
   `constexpr` behaves as a combination of `inline` and `const` and hence must be defined before use in another `constexpr`.
 
-  Prefer `constexpr to `const` for all constant POD declarations, `constexpr` `char` arrays are preferred to `const` `string` literals.
-  ```
+  Prefer `constexpr` to `const` for all constant POD declarations, `constexpr` `char` arrays are preferred to `const` `string` literals.
+
+~~~{.cpp}
   // OK
   constexpr char LITERAL[] = "value";
 
@@ -544,18 +549,20 @@ auto lambda = [
   // Not OK - uncertain initialization order, cannot be used in other
   // constexpr statements.
   const string LITERAL("value");
+~~~
 
-  ```
   `constexpr` functions are evaluated at compile time if all their arguments are constant expressions. Otherwise they default to initialization at runtime. However `constexpr` functions are limited in that they cannot perform dynamic casts, memory allocation or calls to non-constexpr functions.  Prefer `constexpr` over const inline functions.
 
-  ```
+~~~{.cpp}
   constexpr size_t MIN = 200;
   constexpr size_t MAX = 1000;
   constexpr size_t SPAN() { return MAX-MIN; }
   int array[SPAN()];
-  ```
-  Const expression constructors allow object initialization at compile time provided that all the constructor arguments are constexpr and the constuctor body is empty, i.e. all initialization is performed in the initialization list.  Classes which provide constexpr constructors should normally also provide constexpr copy constructors to allow the class to be used in the return value from a constexpr function.
-  ```
+~~~
+
+Const expression constructors allow object initialization at compile time provided that all the constructor arguments are `constexpr` and the constructor body is empty, i.e. all initialization is performed in the initialization list.  Classes which provide `constexpr` constructors should normally also provide `constexpr` copy constructors to allow the class to be used in the return value from a `constexpr` function.
+
+~~~{.cpp}
   class C
   {
   public:
@@ -564,6 +571,6 @@ auto lambda = [
   private:
     const int i;
   };
+~~~
 
-  ```
-  C++11 does not provide constexpr string or containers in the STL and hence constexpr cannot be used for any class using stout's Error() class.
+  C++11 does not provide `constexpr string` or `constexpr` containers in the STL and hence `constexpr` cannot be used for any class using stout's Error() class.

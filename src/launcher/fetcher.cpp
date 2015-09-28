@@ -97,8 +97,9 @@ static Try<string> downloadWithHadoopClient(
   Try<bool> available = hdfs.available();
 
   if (available.isError() || !available.get()) {
-    return Error("Skipping fetch with Hadoop Client as"
-                 " Hadoop Client not available: " + available.error());
+      return Error(
+          "Skipping fetch with Hadoop client: " +
+          (available.isError() ? available.error() : " client not found"));
   }
 
   LOG(INFO) << "Downloading resource with Hadoop client from '" << sourceUri
@@ -117,15 +118,33 @@ static Try<string> downloadWithNet(
     const string& sourceUri,
     const string& destinationPath)
 {
-  LOG(INFO) <<  "Downloading resource from '" << sourceUri
+  // The net::download function only supports these protocols.
+  CHECK(strings::startsWith(sourceUri, "http://")  ||
+        strings::startsWith(sourceUri, "https://") ||
+        strings::startsWith(sourceUri, "ftp://")   ||
+        strings::startsWith(sourceUri, "ftps://"));
+
+  LOG(INFO) << "Downloading resource from '" << sourceUri
             << "' to '" << destinationPath << "'";
 
   Try<int> code = net::download(sourceUri, destinationPath);
   if (code.isError()) {
     return Error("Error downloading resource: " + code.error());
-  } else if (code.get() != 200) {
-    return Error("Error downloading resource, received HTTP/FTP return code " +
-                 stringify(code.get()));
+  } else {
+    // The status code for successful HTTP requests is 200, the status code
+    // for successful FTP file transfers is 226.
+    if (strings::startsWith(sourceUri, "ftp://") ||
+        strings::startsWith(sourceUri, "ftps://")) {
+      if (code.get() != 226) {
+        return Error("Error downloading resource, received FTP return code " +
+                     stringify(code.get()));
+      }
+    } else {
+      if (code.get() != 200) {
+        return Error("Error downloading resource, received HTTP return code " +
+                     stringify(code.get()));
+      }
+    }
   }
 
   return destinationPath;
@@ -151,11 +170,15 @@ static Try<string> copyFile(
 
 
 static Try<string> download(
-    const string& sourceUri,
+    const string& _sourceUri,
     const string& destinationPath,
     const Option<string>& frameworksHome)
 {
+  // Trim leading whitespace for 'sourceUri'.
+  const string sourceUri = strings::trim(_sourceUri, strings::PREFIX);
+
   LOG(INFO) << "Fetching URI '" << sourceUri << "'";
+
   Try<Nothing> validation = Fetcher::validateUri(sourceUri);
   if (validation.isError()) {
     return Error(validation.error());
@@ -175,7 +198,7 @@ static Try<string> download(
   // 2. Try to fetch URI using os::net / libcurl implementation.
   // We consider http, https, ftp, ftps compatible with libcurl.
   if (Fetcher::isNetUri(sourceUri)) {
-     return downloadWithNet(sourceUri, destinationPath);
+    return downloadWithNet(sourceUri, destinationPath);
   }
 
   // 3. Try to fetch the URI using hadoop client.
@@ -238,7 +261,7 @@ static Try<string> fetchBypassingCache(
     Try<bool> extracted = extract(path, sandboxDirectory);
     if (extracted.isError()) {
       return Error(extracted.error());
-    } else {
+    } else if (!extracted.get()) {
       LOG(WARNING) << "Copying instead of extracting resource from URI with "
                    << "'extract' flag, because it does not seem to be an "
                    << "archive: " << uri.value();

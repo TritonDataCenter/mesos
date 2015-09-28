@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <stdint.h>
 
 #include <set>
@@ -110,36 +124,6 @@ TYPED_TEST(MultimapTest, Keys)
   ASSERT_EQ(2, keys.size());
   ASSERT_EQ(1, keys.count("foo"));
   ASSERT_EQ(1, keys.count("bar"));
-}
-
-
-TYPED_TEST(MultimapTest, Iterator)
-{
-  typedef TypeParam Map;
-
-  Map map;
-
-  map.put("foo", 1024);
-  map.put("foo", 1025);
-  ASSERT_EQ(2u, map.get("foo").size());
-  ASSERT_TRUE(map.contains("foo", 1024));
-  ASSERT_TRUE(map.contains("foo", 1025));
-
-  typename Map::iterator i = map.begin();
-
-  ASSERT_TRUE(i != map.end());
-
-  ASSERT_EQ("foo", i->first);
-  ASSERT_EQ(1024, i->second);
-
-  ++i;
-  ASSERT_TRUE(i != map.end());
-
-  ASSERT_EQ("foo", i->first);
-  ASSERT_EQ(1025, i->second);
-
-  ++i;
-  ASSERT_TRUE(i == map.end());
 }
 
 

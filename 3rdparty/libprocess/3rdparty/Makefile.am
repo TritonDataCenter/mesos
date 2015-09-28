@@ -1,3 +1,15 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License
+
 # This Makefile is for building third-party packages from
 # tarballs. For autotools-based packages, we configure each of the
 # packages to build static PIC binaries which we can safely link into
@@ -170,6 +182,7 @@ stout_tests_SOURCES =				\
   $(STOUT)/tests/protobuf_tests.pb.cc		\
   $(STOUT)/tests/protobuf_tests.pb.h		\
   $(STOUT)/tests/protobuf_tests.proto		\
+  $(STOUT)/tests/recordio_tests.cpp		\
   $(STOUT)/tests/result_tests.cpp		\
   $(STOUT)/tests/os/sendfile_tests.cpp		\
   $(STOUT)/tests/os/signals_tests.cpp		\
@@ -177,7 +190,7 @@ stout_tests_SOURCES =				\
   $(STOUT)/tests/some_tests.cpp			\
   $(STOUT)/tests/strings_tests.cpp		\
   $(STOUT)/tests/subcommand_tests.cpp		\
-  $(STOUT)/tests/thread_tests.cpp		\
+  $(STOUT)/tests/try_tests.cpp			\
   $(STOUT)/tests/uuid_tests.cpp			\
   $(STOUT)/tests/version_tests.cpp
 
@@ -201,6 +214,10 @@ endif
 
 if WITH_BUNDLED_PICOJSON
   stout_tests_CPPFLAGS += -I$(PICOJSON)
+
+  # Enable the INT64 support for PicoJSON.
+  stout_tests_CPPFLAGS += -DPICOJSON_USE_INT64
+  stout_tests_CPPFLAGS += -D__STDC_FORMAT_MACROS
 endif
 
 if WITH_BUNDLED_GLOG

@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_DEFERRED_HPP__
 #define __PROCESS_DEFERRED_HPP__
 
@@ -51,7 +65,7 @@ private:
 template <typename F>
 struct _Deferred
 {
-  operator Deferred<void()> () const
+  operator Deferred<void()>() const
   {
     // The 'pid' differentiates an already dispatched functor versus
     // one which still needs to be dispatched (which is done
@@ -76,7 +90,7 @@ struct _Deferred
         });
   }
 
-  operator std::function<void()> () const
+  operator std::function<void()>() const
   {
     if (pid.isNone()) {
       return std::function<void()>(f);
@@ -92,7 +106,7 @@ struct _Deferred
   }
 
   template <typename R>
-  operator Deferred<R()> () const
+  operator Deferred<R()>() const
   {
     if (pid.isNone()) {
       return std::function<R()>(f);
@@ -108,7 +122,7 @@ struct _Deferred
   }
 
   template <typename R>
-  operator std::function<R()> () const
+  operator std::function<R()>() const
   {
     if (pid.isNone()) {
       return std::function<R()>(f);
@@ -131,7 +145,7 @@ struct _Deferred
   // http://stackoverflow.com/questions/20097616/stdbind-to-a-stdfunction-crashes-with-clang).
 #define TEMPLATE(Z, N, DATA)                                            \
   template <ENUM_PARAMS(N, typename P)>                                 \
-  operator Deferred<void(ENUM_PARAMS(N, P))> () const                   \
+  operator Deferred<void(ENUM_PARAMS(N, P))>() const                    \
   {                                                                     \
     if (pid.isNone()) {                                                 \
       return std::function<void(ENUM_PARAMS(N, P))>(f);                 \
@@ -150,7 +164,7 @@ struct _Deferred
   }                                                                     \
                                                                         \
   template <ENUM_PARAMS(N, typename P)>                                 \
-  operator std::function<void(ENUM_PARAMS(N, P))> () const              \
+  operator std::function<void(ENUM_PARAMS(N, P))>() const               \
   {                                                                     \
     if (pid.isNone()) {                                                 \
       return std::function<void(ENUM_PARAMS(N, P))>(f);                 \
@@ -173,7 +187,7 @@ struct _Deferred
 
 #define TEMPLATE(Z, N, DATA)                                            \
   template <typename R, ENUM_PARAMS(N, typename P)>                     \
-  operator Deferred<R(ENUM_PARAMS(N, P))> () const                      \
+  operator Deferred<R(ENUM_PARAMS(N, P))>() const                       \
   {                                                                     \
     if (pid.isNone()) {                                                 \
       return std::function<R(ENUM_PARAMS(N, P))>(f);                    \
@@ -192,7 +206,7 @@ struct _Deferred
   }                                                                     \
                                                                         \
   template <typename R, ENUM_PARAMS(N, typename P)>                     \
-  operator std::function<R(ENUM_PARAMS(N, P))> () const                 \
+  operator std::function<R(ENUM_PARAMS(N, P))>() const                  \
   {                                                                     \
     if (pid.isNone()) {                                                 \
       return std::function<R(ENUM_PARAMS(N, P))>(f);                    \

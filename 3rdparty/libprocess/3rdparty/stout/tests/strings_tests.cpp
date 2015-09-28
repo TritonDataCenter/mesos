@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <map>
 #include <set>
 #include <string>
@@ -72,6 +86,16 @@ TEST(StringsTest, Trim)
   EXPECT_EQ("hello world", strings::trim("  hello world  ", " "));
   EXPECT_EQ("hello world", strings::trim(" \t hello world\t  ", " \t"));
   EXPECT_EQ("hello world", strings::trim(" \t hello world\t \n\r "));
+
+  // Also test trimming from just the prefix or suffix.
+  EXPECT_EQ("hello world\t \n\r ",
+            strings::trim(" \t hello world\t \n\r ", strings::PREFIX));
+  EXPECT_EQ(" \t hello world",
+            strings::trim(" \t hello world\t \n\r ", strings::SUFFIX));
+  EXPECT_EQ("\t hello world\t \n\r ",
+            strings::trim(" \t hello world\t \n\r ", strings::PREFIX, " "));
+  EXPECT_EQ(" \t hello world\t \n",
+            strings::trim(" \t hello world\t \n\r ", strings::SUFFIX, " \r"));
 }
 
 

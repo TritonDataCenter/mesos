@@ -16,10 +16,14 @@
  * limitations under the License.
  */
 
+#ifndef __MASTER_VALIDATION_HPP__
+#define __MASTER_VALIDATION_HPP__
+
 #include <google/protobuf/repeated_field.h>
 
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
+#include <mesos/scheduler/scheduler.hpp>
 
 #include <stout/error.hpp>
 #include <stout/option.hpp>
@@ -34,6 +38,16 @@ struct Framework;
 struct Slave;
 
 namespace validation {
+
+namespace scheduler {
+namespace call {
+
+// Validates that a scheduler call is well-formed.
+// TODO(bmahler): Add unit tests.
+Option<Error> validate(const mesos::scheduler::Call& call);
+
+} // namespace call {
+} // namespace scheduler {
 
 namespace resource {
 
@@ -93,7 +107,7 @@ namespace operation {
 // Validates the RESERVE operation.
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const std::string& role,
+    const Option<std::string>& role,
     const Option<std::string>& principal);
 
 
@@ -122,3 +136,5 @@ Option<Error> validate(
 } // namespace master {
 } // namespace internal {
 } // namespace mesos {
+
+#endif // __MASTER_VALIDATION_HPP__

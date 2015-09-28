@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __OPENSSL_HPP__
 #define __OPENSSL_HPP__
 
@@ -31,7 +45,6 @@ public:
   Option<std::string> ca_dir;
   Option<std::string> ca_file;
   std::string ciphers;
-  bool enable_ssl_v2;
   bool enable_ssl_v3;
   bool enable_tls_v1_0;
   bool enable_tls_v1_1;
@@ -54,7 +67,6 @@ const Flags& flags();
 //    SSL_CA_DIR=(path to CA directory)
 //    SSL_CA_FILE=(path to CA file)
 //    SSL_CIPHERS=(accepted ciphers separated by ':')
-//    SSL_ENABLE_SSL_V2=(false|0,true|1)
 //    SSL_ENABLE_SSL_V3=(false|0,true|1)
 //    SSL_ENABLE_TLS_V1_0=(false|0,true|1)
 //    SSL_ENABLE_TLS_V1_1=(false|0,true|1)

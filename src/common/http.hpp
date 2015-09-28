@@ -21,19 +21,57 @@
 
 #include <vector>
 
+#include <mesos/http.hpp>
 #include <mesos/mesos.hpp>
 
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
+#include <stout/protobuf.hpp>
 
 namespace mesos {
 
 class Resources;
+class Attributes;
 
 namespace internal {
 
-class Attributes;
 class Task;
+
+
+// Serializes a protobuf message for transmission
+// based on the HTTP content type.
+std::string serialize(
+    ContentType contentType,
+    const google::protobuf::Message& message);
+
+
+// Deserializes a string message into a protobuf message based on the
+// HTTP content type.
+template <typename Message>
+Try<Message> deserialize(
+    ContentType contentType,
+    const std::string& body)
+{
+  switch (contentType) {
+    case ContentType::PROTOBUF: {
+      Message message;
+      if (!message.ParseFromString(body)) {
+        return Error("Failed to parse body into a protobuf object");
+      }
+      return message;
+    }
+    case ContentType::JSON: {
+      Try<JSON::Value> value = JSON::parse(body);
+      if (value.isError()) {
+        return Error("Failed to parse body into JSON: " + value.error());
+      }
+
+      return ::protobuf::parse<Message>(value.get());
+    }
+  }
+
+  UNREACHABLE();
+}
 
 
 JSON::Object model(const Resources& resources);
@@ -41,6 +79,9 @@ JSON::Object model(const hashmap<std::string, Resources>& roleResources);
 JSON::Object model(const Attributes& attributes);
 JSON::Object model(const CommandInfo& command);
 JSON::Object model(const ExecutorInfo& executorInfo);
+JSON::Array model(const Labels& labels);
+JSON::Object model(const NetworkInfo& info);
+JSON::Object model(const ContainerStatus& status);
 
 // These are the two identical ways to model a task, depending on
 // whether you have a 'Task' or a 'TaskInfo' available.

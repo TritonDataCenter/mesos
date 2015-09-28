@@ -32,17 +32,19 @@
 
 #include "messages/messages.hpp"
 
-using std::vector;
-
 using namespace mesos;
 using namespace mesos::internal;
+
+using std::vector;
+
+using mesos::internal::protobuf::createTask;
 
 // TODO(bmahler): Add tests for other JSON models.
 
 // This test ensures we don't break the API when it comes to JSON
 // representation of tasks. Also, we want to ensure that tasks are
 // modeled the same way when using 'Task' vs. 'TaskInfo'.
-TEST(HTTP, ModelTask)
+TEST(HTTPTest, ModelTask)
 {
   TaskID taskId;
   taskId.set_value("t");
@@ -75,7 +77,7 @@ TEST(HTTP, ModelTask)
   task.mutable_slave_id()->CopyFrom(slaveId);
   task.mutable_command()->set_value("echo hello");
 
-  Task task_ = protobuf::createTask(task, state, frameworkId);
+  Task task_ = createTask(task, state, frameworkId);
   task_.add_statuses()->CopyFrom(statuses[0]);
 
   JSON::Value object = model(task, frameworkId, state, statuses);
@@ -86,7 +88,6 @@ TEST(HTTP, ModelTask)
       "  \"executor_id\":\"\","
       "  \"framework_id\":\"f\","
       "  \"id\":\"t\","
-      "  \"labels\": [],"
       "  \"name\":\"task\","
       "  \"resources\":"
       "  {"
@@ -117,7 +118,7 @@ TEST(HTTP, ModelTask)
 
 // This test verifies that Resources model combines all resources of different
 // roles and filters out revocable resources.
-TEST(HTTP, ModelResources)
+TEST(HTTPTest, ModelResources)
 {
   // Resources of mixed types, roles, duplicate names; standard (
   // e.g., 'cpus') and custom (i.e., 'bar').

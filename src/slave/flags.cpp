@@ -36,7 +36,17 @@ mesos::internal::slave::Flags::Flags()
       "hostname",
       "The hostname the slave should report.\n"
       "If left unset, the hostname is resolved from the IP address\n"
-      "that the slave binds to.");
+      "that the slave binds to; unless the user explicitly prevents\n"
+      "that, using --no-hostname_lookup, in which case the IP itself\n"
+      "is used.");
+
+  add(&Flags::hostname_lookup,
+      "hostname_lookup",
+      "Whether we should execute a lookup to find out the server's hostname,\n"
+      "if not explicitly set (via, e.g., `--hostname`).\n"
+      "True by default; if set to 'false' it will cause Mesos\n"
+      "to use the IP address, unless the hostname is explicitly set.",
+      true);
 
   add(&Flags::version,
       "version",
@@ -59,6 +69,45 @@ mesos::internal::slave::Flags::Flags()
       "for the Mesos Containerizer.",
       "posix/cpu,posix/mem");
 
+  add(&Flags::launcher,
+      "launcher",
+      "The launcher to be used for Mesos containerizer. It could either be\n"
+      "'linux' or 'posix'. The Linux launcher is required for cgroups\n"
+      "isolation and for any isolators that require Linux namespaces such as\n"
+      "network, pid, etc. If unspecified, the slave will choose the Linux\n"
+      "launcher if it's running as root on Linux.");
+
+  add(&Flags::image_providers,
+      "image_providers",
+      "Comma separated list of supported image providers,\n"
+      "e.g., 'APPC,DOCKER'.");
+
+  add(&Flags::image_provisioner_backend,
+      "image_provisioner_backend",
+      "Strategy for provisioning container rootfs from images,\n"
+      "e.g., 'bind', 'copy'.",
+      "copy");
+
+  add(&Flags::appc_store_dir,
+      "appc_store_dir",
+      "Directory the appc provisioner will store images in.",
+      "/tmp/mesos/store/appc");
+
+  add(&Flags::docker_local_archives_dir,
+      "docker_local_archives_dir",
+      "Directory for docker local puller to look in for image archives",
+      "/tmp/mesos/images/docker");
+
+  add(&Flags::docker_puller,
+      "docker_puller",
+      "Strategy for docker puller to fetch images",
+      "local");
+
+  add(&Flags::docker_store_dir,
+      "docker_store_dir",
+      "Directory the docker provisioner will store images in",
+      "/tmp/mesos/store/docker");
+
   add(&Flags::default_role,
       "default_role",
       "Any resources in the --resources flag that\n"
@@ -73,7 +122,8 @@ mesos::internal::slave::Flags::Flags()
       "Attributes of machine, in the form:\n"
       "rack:2 or 'rack:2;u:1'");
 
-  add(&Flags::fetcher_cache_size, "fetcher_cache_size",
+  add(&Flags::fetcher_cache_size,
+      "fetcher_cache_size",
       "Size of the fetcher cache in Bytes.",
       DEFAULT_FETCHER_CACHE_SIZE);
 
@@ -85,7 +135,8 @@ mesos::internal::slave::Flags::Flags()
   // and the cache directory can interfere with each other in
   // unpredictable ways by occupying shared space. So it is recommended
   // to set the cache directory explicitly.
-  add(&Flags::fetcher_cache_dir, "fetcher_cache_dir",
+  add(&Flags::fetcher_cache_dir,
+      "fetcher_cache_dir",
       "Parent directory for fetcher cache directories\n"
       "(one subdirectory per slave).",
       "/tmp/mesos/fetch");
@@ -209,7 +260,7 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::recovery_timeout,
       "recovery_timeout",
-      "Amount of time alloted for the slave to recover. If the slave takes\n"
+      "Amount of time allotted for the slave to recover. If the slave takes\n"
       "longer than recovery_timeout to recover, any executors that are\n"
       "waiting to reconnect to the slave will self-terminate.\n",
       RECOVERY_TIMEOUT);
@@ -290,6 +341,11 @@ mesos::internal::slave::Flags::Flags()
       "normal containers (non-revocable cpu). Currently only\n"
       "supported by the cgroups/cpu isolator.",
       true);
+
+  add(&Flags::systemd_runtime_directory,
+      "systemd_runtime_directory",
+      "The path to the systemd system run time directory\n",
+      "/run/systemd/system");
 #endif
 
   add(&Flags::firewall_rules,
@@ -305,7 +361,7 @@ mesos::internal::slave::Flags::Flags()
       "{\n"
       "  \"disabled_endpoints\": {\n"
       "    \"paths\": [\n"
-      "      \"/files/browse.json\",\n"
+      "      \"/files/browse\",\n"
       "      \"/slave(0)/stats.json\",\n"
       "    ]\n"
       "  }\n"
@@ -353,12 +409,6 @@ mesos::internal::slave::Flags::Flags()
       "containerizer.\n",
       "docker");
 
-  add(&Flags::docker_sandbox_directory,
-      "docker_sandbox_directory",
-      "The absolute path for the directory in the container where the\n"
-      "sandbox is mapped to.\n",
-      "/mnt/mesos/sandbox");
-
   add(&Flags::docker_remove_delay,
       "docker_remove_delay",
       "The amount of time to wait before removing docker containers\n"
@@ -390,6 +440,12 @@ mesos::internal::slave::Flags::Flags()
       "to provide docker CLI access to the docker daemon. This must be the\n"
       "path used by the slave's docker image.\n",
       "/var/run/docker.sock");
+
+  add(&Flags::sandbox_directory,
+      "sandbox_directory",
+      "The absolute path for the directory in the container where the\n"
+      "sandbox is mapped to.\n",
+      "/mnt/mesos/sandbox");
 
   add(&Flags::default_container_info,
       "default_container_info",

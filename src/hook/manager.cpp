@@ -33,6 +33,7 @@
 #include "hook/manager.hpp"
 #include "module/manager.hpp"
 
+using std::map;
 using std::string;
 using std::vector;
 
@@ -111,7 +112,7 @@ Labels HookManager::masterLaunchTaskLabelDecorator(
     TaskInfo taskInfo_ = taskInfo;
 
     foreachpair (const string& name, Hook* hook, availableHooks) {
-      const Result<Labels>& result =
+      const Result<Labels> result =
         hook->masterLaunchTaskLabelDecorator(
             taskInfo_,
             frameworkInfo,
@@ -132,8 +133,21 @@ Labels HookManager::masterLaunchTaskLabelDecorator(
 }
 
 
+void HookManager::masterSlaveLostHook(const SlaveInfo& slaveInfo)
+{
+  foreachpair (const string& name, Hook* hook, availableHooks) {
+    Try<Nothing> result = hook->masterSlaveLostHook(slaveInfo);
+    if (result.isError()) {
+      LOG(WARNING) << "Master slave-lost hook failed for module '"
+                   << name << "': " << result.error();
+    }
+  }
+}
+
+
 Labels HookManager::slaveRunTaskLabelDecorator(
     const TaskInfo& taskInfo,
+    const ExecutorInfo& executorInfo,
     const FrameworkInfo& frameworkInfo,
     const SlaveInfo& slaveInfo)
 {
@@ -141,8 +155,8 @@ Labels HookManager::slaveRunTaskLabelDecorator(
     TaskInfo taskInfo_ = taskInfo;
 
     foreachpair (const string& name, Hook* hook, availableHooks) {
-      const Result<Labels>& result =
-        hook->slaveRunTaskLabelDecorator(taskInfo_, frameworkInfo, slaveInfo);
+      const Result<Labels> result = hook->slaveRunTaskLabelDecorator(
+          taskInfo_, executorInfo, frameworkInfo, slaveInfo);
 
       // NOTE: If the hook returns None(), the task labels won't be
       // changed.
@@ -164,7 +178,7 @@ Environment HookManager::slaveExecutorEnvironmentDecorator(
 {
   synchronized (mutex) {
     foreachpair (const string& name, Hook* hook, availableHooks) {
-      const Result<Environment>& result =
+      const Result<Environment> result =
         hook->slaveExecutorEnvironmentDecorator(executorInfo);
 
       // NOTE: If the hook returns None(), the environment won't be
@@ -183,17 +197,79 @@ Environment HookManager::slaveExecutorEnvironmentDecorator(
 }
 
 
+void HookManager::slavePreLaunchDockerHook(
+    const ContainerInfo& containerInfo,
+    const CommandInfo& commandInfo,
+    const Option<TaskInfo>& taskInfo,
+    const ExecutorInfo& executorInfo,
+    const string& name,
+    const string& sandboxDirectory,
+    const string& mappedDirectory,
+    const Option<Resources>& resources,
+    const Option<map<string, string>>& env)
+{
+  foreachpair (const string& name, Hook* hook, availableHooks) {
+    Try<Nothing> result =
+      hook->slavePreLaunchDockerHook(
+          containerInfo,
+          commandInfo,
+          taskInfo,
+          executorInfo,
+          name,
+          sandboxDirectory,
+          mappedDirectory,
+          resources,
+          env);
+    if (result.isError()) {
+      LOG(WARNING) << "Slave pre launch docker hook failed for module '"
+                   << name << "': " << result.error();
+    }
+  }
+}
+
+
 void HookManager::slaveRemoveExecutorHook(
     const FrameworkInfo& frameworkInfo,
     const ExecutorInfo& executorInfo)
 {
   foreachpair (const string& name, Hook* hook, availableHooks) {
-    const Try<Nothing>& result =
+    const Try<Nothing> result =
       hook->slaveRemoveExecutorHook(frameworkInfo, executorInfo);
     if (result.isError()) {
       LOG(WARNING) << "Slave remove executor hook failed for module '"
                    << name << "': " << result.error();
     }
+  }
+}
+
+
+TaskStatus HookManager::slaveTaskStatusDecorator(
+    const FrameworkID& frameworkId,
+    TaskStatus status)
+{
+  synchronized (mutex) {
+    foreachpair (const string& name, Hook* hook, availableHooks) {
+      const Result<TaskStatus> result =
+        hook->slaveTaskStatusDecorator(frameworkId, status);
+
+      // NOTE: Labels/ContainerStatus remain unchanged if the hook returns
+      // None().
+      if (result.isSome()) {
+        if (result.get().has_labels()) {
+          status.mutable_labels()->CopyFrom(result.get().labels());
+        }
+
+        if (result.get().has_container_status()) {
+          status.mutable_container_status()->CopyFrom(
+              result.get().container_status());
+        }
+      } else if (result.isError()) {
+        LOG(WARNING) << "Slave TaskStatus decorator hook failed for "
+                     << "module '" << name << "': " << result.error();
+      }
+    }
+
+    return status;
   }
 }
 

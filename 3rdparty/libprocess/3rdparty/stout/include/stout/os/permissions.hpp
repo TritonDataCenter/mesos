@@ -18,6 +18,7 @@
 
 #include <string>
 
+
 namespace os {
 
 struct Permissions
@@ -41,7 +42,8 @@ struct Permissions
     sticky = mode & S_ISVTX;
   }
 
-  struct {
+  struct
+  {
     bool r;
     bool w;
     bool x;
@@ -53,15 +55,19 @@ struct Permissions
   bool sticky;
 };
 
+
 inline Try<Permissions> permissions(const std::string& path)
 {
-  struct stat s;
-  if (::stat(path.c_str(), &s) < 0) {
+  struct stat status;
+  if (::stat(path.c_str(), &status) < 0) {
     return ErrnoError();
   }
-  return Permissions(s.st_mode);
+
+  return Permissions(status.st_mode);
 }
 
+
 } // namespace os {
+
 
 #endif // __STOUT_OS_PERMISSIONS_HPP__

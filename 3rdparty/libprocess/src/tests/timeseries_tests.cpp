@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <gmock/gmock.h>
 
 #include <process/clock.hpp>
@@ -20,7 +34,7 @@ List<int> toList(const TimeSeries<int>& series)
 }
 
 
-TEST(TimeSeries, Set)
+TEST(TimeSeriesTest, Set)
 {
   TimeSeries<int> series;
 
@@ -36,7 +50,7 @@ TEST(TimeSeries, Set)
   ASSERT_EQ(1, latest.get().data);
 }
 
-TEST(TimeSeries, Sparsify)
+TEST(TimeSeriesTest, Sparsify)
 {
   // We have to pause the clock because this test often results
   // in to set() operations occurring at the same time according
@@ -97,7 +111,7 @@ TEST(TimeSeries, Sparsify)
 }
 
 
-TEST(TimeSeries, Truncate)
+TEST(TimeSeriesTest, Truncate)
 {
   // Test simple truncation first.
   Clock::pause();

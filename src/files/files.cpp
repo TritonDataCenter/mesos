@@ -1,3 +1,21 @@
+/**
+* Licensed to the Apache Software Foundation (ASF) under one
+* or more contributor license agreements.  See the NOTICE file
+* distributed with this work for additional information
+* regarding copyright ownership.  The ASF licenses this file
+* to you under the Apache License, Version 2.0 (the
+* "License"); you may not use this file except in compliance
+* with the License.  You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <unistd.h>
 
 #include <sys/stat.h>
@@ -116,6 +134,8 @@ FilesProcess::FilesProcess()
 
 void FilesProcess::initialize()
 {
+  // TODO(ijimenez): Remove these endpoints at the end of the
+  // deprecation cycle on 0.26.
   route("/browse.json",
         FilesProcess::BROWSE_HELP,
         &FilesProcess::browse);
@@ -126,6 +146,19 @@ void FilesProcess::initialize()
         FilesProcess::DOWNLOAD_HELP,
         &FilesProcess::download);
   route("/debug.json",
+        FilesProcess::DEBUG_HELP,
+        &FilesProcess::debug);
+
+  route("/browse",
+        FilesProcess::BROWSE_HELP,
+        &FilesProcess::browse);
+  route("/read",
+        FilesProcess::READ_HELP,
+        &FilesProcess::read);
+  route("/download",
+        FilesProcess::DOWNLOAD_HELP,
+        &FilesProcess::download);
+  route("/debug",
         FilesProcess::DEBUG_HELP,
         &FilesProcess::debug);
 }
@@ -170,8 +203,6 @@ void FilesProcess::detach(const string& name)
 const string FilesProcess::BROWSE_HELP = HELP(
     TLDR(
         "Returns a file listing for a directory."),
-    USAGE(
-        "/files/browse.json"),
     DESCRIPTION(
         "Lists files and directories contained in the path as",
         "a JSON object.",
@@ -183,7 +214,7 @@ const string FilesProcess::BROWSE_HELP = HELP(
 
 Future<Response> FilesProcess::browse(const Request& request)
 {
-  Option<string> path = request.query.get("path");
+  Option<string> path = request.url.query.get("path");
 
   if (!path.isSome() || path.get().empty()) {
     return BadRequest("Expecting 'path=value' in query.\n");
@@ -216,11 +247,11 @@ Future<Response> FilesProcess::browse(const Request& request)
   }
 
   JSON::Array listing;
-  foreachvalue(const JSON::Object& file, files) {
+  foreachvalue (const JSON::Object& file, files) {
     listing.values.push_back(file);
   }
 
-  return OK(listing, request.query.get("jsonp"));
+  return OK(listing, request.url.query.get("jsonp"));
 }
 
 
@@ -235,8 +266,6 @@ Future<Response> _read(int fd,
   object.values["offset"] = offset;
   object.values["data"] = string(data.get(), size);
 
-  os::close(fd);
-
   return OK(object, jsonp);
 }
 
@@ -244,8 +273,6 @@ Future<Response> _read(int fd,
 const string FilesProcess::READ_HELP = HELP(
     TLDR(
         "Reads data from a file."),
-    USAGE(
-        "/files/read.json"),
     DESCRIPTION(
         "This endpoint reads data from a file at a given offset and for",
         "a given length."
@@ -260,7 +287,7 @@ const string FilesProcess::READ_HELP = HELP(
 
 Future<Response> FilesProcess::read(const Request& request)
 {
-  Option<string> path = request.query.get("path");
+  Option<string> path = request.url.query.get("path");
 
   if (!path.isSome() || path.get().empty()) {
     return BadRequest("Expecting 'path=value' in query.\n");
@@ -268,21 +295,26 @@ Future<Response> FilesProcess::read(const Request& request)
 
   off_t offset = -1;
 
-  if (request.query.get("offset").isSome()) {
-    Try<off_t> result = numify<off_t>(request.query.get("offset").get());
+  if (request.url.query.get("offset").isSome()) {
+    Try<off_t> result = numify<off_t>(request.url.query.get("offset").get());
+
     if (result.isError()) {
       return BadRequest("Failed to parse offset: " + result.error() + ".\n");
     }
+
     offset = result.get();
   }
 
   ssize_t length = -1;
 
-  if (request.query.get("length").isSome()) {
-    Try<ssize_t> result = numify<ssize_t>(request.query.get("length").get());
+  if (request.url.query.get("length").isSome()) {
+    Try<ssize_t> result = numify<ssize_t>(
+        request.url.query.get("length").get());
+
     if (result.isError()) {
       return BadRequest("Failed to parse length: " + result.error() + ".\n");
     }
+
     length = result.get();
   }
 
@@ -337,7 +369,7 @@ Future<Response> FilesProcess::read(const Request& request)
     JSON::Object object;
     object.values["offset"] = size;
     object.values["data"] = "";
-    return OK(object, request.query.get("jsonp"));
+    return OK(object, request.url.query.get("jsonp"));
   }
 
   // Seek to the offset we want to read from.
@@ -354,6 +386,7 @@ Future<Response> FilesProcess::read(const Request& request)
     string error =
         "Failed to set file descriptor nonblocking: " + nonblock.error();
     LOG(WARNING) << error;
+    os::close(fd.get());
     return InternalServerError(error);
   }
 
@@ -367,15 +400,14 @@ Future<Response> FilesProcess::read(const Request& request)
         lambda::_1,
         offset,
         data,
-        request.query.get("jsonp")));
+        request.url.query.get("jsonp")))
+    .onAny(lambda::bind(&os::close, fd.get()));
 }
 
 
 const string FilesProcess::DOWNLOAD_HELP = HELP(
     TLDR(
         "Returns the raw file contents for a given path."),
-    USAGE(
-        "/files/download.json"),
     DESCRIPTION(
         "This endpoint will return the raw file contents for the",
         "given path.",
@@ -387,7 +419,7 @@ const string FilesProcess::DOWNLOAD_HELP = HELP(
 
 Future<Response> FilesProcess::download(const Request& request)
 {
-  Option<string> path = request.query.get("path");
+  Option<string> path = request.url.query.get("path");
 
   if (!path.isSome() || path.get().empty()) {
     return BadRequest("Expecting 'path=value' in query.\n");
@@ -431,8 +463,6 @@ Future<Response> FilesProcess::download(const Request& request)
 const string FilesProcess::DEBUG_HELP = HELP(
     TLDR(
         "Returns the internal virtual path mapping."),
-    USAGE(
-        "/files/debug.json"),
     DESCRIPTION(
         "This endpoint shows the internal virtual path map as a",
         "JSON object."));
@@ -441,10 +471,10 @@ const string FilesProcess::DEBUG_HELP = HELP(
 Future<Response> FilesProcess::debug(const Request& request)
 {
   JSON::Object object;
-  foreachpair(const string& name, const string& path, paths) {
+  foreachpair (const string& name, const string& path, paths) {
     object.values[name] = path;
   }
-  return OK(object, request.query.get("jsonp"));
+  return OK(object, request.url.query.get("jsonp"));
 }
 
 

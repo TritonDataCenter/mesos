@@ -44,8 +44,19 @@ public:
 
   bool version;
   Option<std::string> hostname;
+  bool hostname_lookup;
   Option<std::string> resources;
   std::string isolation;
+  Option<std::string> launcher;
+
+  Option<std::string> image_providers;
+  std::string image_provisioner_backend;
+  std::string appc_store_dir;
+
+  std::string docker_local_archives_dir;
+  std::string docker_puller;
+  std::string docker_store_dir;
+
   std::string default_role;
   Option<std::string> attributes;
   Bytes fetcher_cache_size;
@@ -82,6 +93,7 @@ public:
   Duration perf_interval;
   Duration perf_duration;
   bool revocable_cpu_low_priority;
+  std::string systemd_runtime_directory;
 #endif
   Option<Firewall> firewall_rules;
   Option<Path> credential;
@@ -90,8 +102,8 @@ public:
   Option<std::string> default_container_image;
   std::string docker;
   Option<std::string> docker_mesos_image;
-  std::string docker_sandbox_directory;
   Duration docker_remove_delay;
+  std::string sandbox_directory;
   Option<ContainerInfo> default_container_info;
   Duration docker_stop_timeout;
   bool docker_kill_orphans;

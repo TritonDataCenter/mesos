@@ -280,7 +280,6 @@ inline Result<std::string> cmdline(const Option<pid_t>& pid = None())
 
     // Check for any read errors.
     if (file.fail() && !file.eof()) {
-      file.close();
       return Error("Failed to read '" + path + "'");
     } else if (!file.eof()) {
       file.get(); // Read the null byte.
@@ -381,11 +380,8 @@ inline Try<SystemStatus> status()
   }
 
   if (file.fail() && !file.eof()) {
-    file.close();
     return Error("Failed to read /proc/stat");
   }
-
-  file.close();
 
   return SystemStatus(btime);
 }
@@ -405,14 +401,14 @@ struct CPU
 };
 
 
-inline bool operator == (const CPU& lhs, const CPU& rhs)
+inline bool operator==(const CPU& lhs, const CPU& rhs)
 {
   return (lhs.id == rhs.id) && (lhs.core == rhs.core) &&
     (lhs.socket == rhs.socket);
 }
 
 
-inline bool operator < (const CPU& lhs, const CPU& rhs)
+inline bool operator<(const CPU& lhs, const CPU& rhs)
 {
   // Sort by (socket, core, id).
   if (lhs.socket != rhs.socket) {
@@ -429,7 +425,7 @@ inline bool operator < (const CPU& lhs, const CPU& rhs)
 }
 
 
-inline std::ostream& operator << (std::ostream& out, const CPU& cpu)
+inline std::ostream& operator<<(std::ostream& out, const CPU& cpu)
 {
   return out << "CPU (id:" << cpu.id << ", "
              << "core:" << cpu.core << ", "
@@ -507,11 +503,8 @@ inline Try<std::list<CPU> > cpus()
   }
 
   if (file.fail() && !file.eof()) {
-    file.close();
     return Error("Failed to read /proc/cpuinfo");
   }
-
-  file.close();
 
   return results;
 }

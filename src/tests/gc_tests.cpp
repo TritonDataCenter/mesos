@@ -465,7 +465,7 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedFramework)
   process::UPID filesUpid("files", process::address());
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(
       process::http::NotFound().status,
-      process::http::get(filesUpid, "browse.json", "path=" + frameworkDir));
+      process::http::get(filesUpid, "browse", "path=" + frameworkDir));
 
   Clock::resume();
 
@@ -566,7 +566,7 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedExecutor)
   process::UPID files("files", process::address());
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(
       process::http::NotFound().status,
-      process::http::get(files, "browse.json", "path=" + executorDir));
+      process::http::get(files, "browse", "path=" + executorDir));
 
   Clock::resume();
 
@@ -681,7 +681,7 @@ TEST_F(GarbageCollectorIntegrationTest, DiskUsage)
   process::UPID files("files", process::address());
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(
       process::http::NotFound().status,
-      process::http::get(files, "browse.json", "path=" + executorDir));
+      process::http::get(files, "browse", "path=" + executorDir));
 
   Clock::resume();
 
@@ -703,11 +703,8 @@ TEST_F(GarbageCollectorIntegrationTest, Unschedule)
   Future<SlaveRegisteredMessage> slaveRegistered =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
-  ExecutorInfo executor1; // Bug in gcc 4.1.*, must assign on next line.
-  executor1 = CREATE_EXECUTOR_INFO("executor-1", "exit 1");
-
-  ExecutorInfo executor2; // Bug in gcc 4.1.*, must assign on next line.
-  executor2 = CREATE_EXECUTOR_INFO("executor-2", "exit 1");
+  ExecutorInfo executor1 = CREATE_EXECUTOR_INFO("executor-1", "exit 1");
+  ExecutorInfo executor2 = CREATE_EXECUTOR_INFO("executor-2", "exit 1");
 
   MockExecutor exec1(executor1.executor_id());
   MockExecutor exec2(executor2.executor_id());

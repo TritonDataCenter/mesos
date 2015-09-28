@@ -30,6 +30,8 @@
 
 #include <mesos/authentication/authenticator.hpp>
 
+#include <mesos/authorizer/authorizer.hpp>
+
 #include <mesos/master/allocator.hpp>
 
 #include <mesos/module/authenticator.hpp>
@@ -48,6 +50,7 @@
 #include <process/metrics/metrics.hpp>
 
 #include <stout/check.hpp>
+#include <stout/duration.hpp>
 #include <stout/error.hpp>
 #include <stout/ip.hpp>
 #include <stout/lambda.hpp>
@@ -62,8 +65,6 @@
 #include <stout/uuid.hpp>
 
 #include "authentication/cram_md5/authenticator.hpp"
-
-#include "authorizer/authorizer.hpp"
 
 #include "common/build.hpp"
 #include "common/date_utils.hpp"
@@ -106,6 +107,8 @@ using process::Time;
 using process::Timer;
 using process::UPID;
 
+using process::http::Pipe;
+
 using process::metrics::Counter;
 
 namespace mesos {
@@ -116,7 +119,7 @@ using mesos::master::RoleInfo;
 using mesos::master::allocator::Allocator;
 
 
-class SlaveObserver : public Process<SlaveObserver>
+class SlaveObserver : public ProtobufProcess<SlaveObserver>
 {
 public:
   SlaveObserver(const UPID& _slave,
@@ -140,9 +143,11 @@ public:
       pinged(false),
       connected(true)
   {
-    // TODO(vinod): Deprecate this handler in 0.22.0 in favor of a
-    // new PongSlaveMessage handler.
-    install("PONG", &SlaveObserver::pong);
+    // TODO(Wang Yong Qiao): For backwards compatibility, this handler is kept.
+    // Suggest to remove this handler in 0.26.0.
+    install("PONG", &SlaveObserver::pongOld);
+
+    install<PongSlaveMessage>(&SlaveObserver::pong);
   }
 
   void reconnect()
@@ -163,21 +168,20 @@ protected:
 
   void ping()
   {
-    // TODO(vinod): In 0.22.0, master should send the PingSlaveMessage
-    // instead of sending "PING" with the encoded PingSlaveMessage.
-    // Currently we do not do this for backwards compatibility with
-    // slaves on 0.20.0.
     PingSlaveMessage message;
     message.set_connected(connected);
-    string data;
-    CHECK(message.SerializeToString(&data));
-    send(slave, "PING", data.data(), data.size());
+    send(slave, message);
 
     pinged = true;
     delay(slavePingTimeout, self(), &SlaveObserver::timeout);
   }
 
-  void pong(const UPID& from, const string& body)
+  void pongOld(const UPID& from, const string& body)
+  {
+    pong();
+  }
+
+  void pong()
   {
     timeouts = 0;
     pinged = false;
@@ -301,21 +305,14 @@ Master::Master(
   // NOTE: We populate 'info_' here instead of inside 'initialize()'
   // because 'StandaloneMasterDetector' needs access to the info.
 
-  // The master ID is currently comprised of the current date, the IP
-  // address and port from self() and the OS PID.
-  Try<string> id = strings::format(
-      "%s-%u-%u-%d",
-      DateUtils::currentDate(),
-      self().address.ip.in().get().s_addr,
-      self().address.port,
-      getpid());
-
-  CHECK(!id.isError()) << id.error();
-
-  info_.set_id(id.get());
+  // Master ID is generated randomly based on UUID.
+  info_.set_id(UUID::random().toString());
 
   // NOTE: Currently, we store ip in MasterInfo in network order,
   // which should be fixed. See MESOS-1201 for details.
+  // TODO(marco): The ip, port, hostname fields above are
+  //     being deprecated; the code should be removed once
+  //     the deprecation cycle is complete.
   info_.set_ip(self().address.ip.in().get().s_addr);
 
   info_.set_port(self().address.port);
@@ -326,18 +323,29 @@ Master::Master(
   string hostname;
 
   if (flags.hostname.isNone()) {
-    Try<string> result = net::getHostname(self().address.ip);
+    if (flags.hostname_lookup) {
+      Try<string> result = net::getHostname(self().address.ip);
 
-    if (result.isError()) {
-      LOG(FATAL) << "Failed to get hostname: " << result.error();
+      if (result.isError()) {
+        LOG(FATAL) << "Failed to get hostname: " << result.error();
+      }
+
+      hostname = result.get();
+    } else {
+      // We use the IP address for hostname if the user requested us
+      // NOT to look it up, and it wasn't explicitly set via --hostname:
+      hostname = stringify(self().address.ip);
     }
-
-    hostname = result.get();
   } else {
     hostname = flags.hostname.get();
   }
 
   info_.set_hostname(hostname);
+
+  // This uses the new `Address` message in `MasterInfo`.
+  info_.mutable_address()->set_ip(stringify(self().address.ip));
+  info_.mutable_address()->set_port(self().address.port);
+  info_.mutable_address()->set_hostname(hostname);
 }
 
 
@@ -609,6 +617,7 @@ void Master::initialize()
   allocator->initialize(
       flags.allocation_interval,
       defer(self(), &Master::offer, lambda::_1, lambda::_2),
+      defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
       roleInfos);
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
@@ -713,6 +722,16 @@ void Master::initialize()
       &StatusUpdateMessage::update,
       &StatusUpdateMessage::pid);
 
+  // Added in 0.24.0 to support HTTP schedulers. Since
+  // these do not have a pid, the slave must forward
+  // messages through the master.
+  install<ExecutorToFrameworkMessage>(
+      &Master::executorMessage,
+      &ExecutorToFrameworkMessage::slave_id,
+      &ExecutorToFrameworkMessage::framework_id,
+      &ExecutorToFrameworkMessage::executor_id,
+      &ExecutorToFrameworkMessage::data);
+
   install<ReconcileTasksMessage>(
       &Master::reconcileTasks,
       &ReconcileTasksMessage::framework_id,
@@ -737,6 +756,12 @@ void Master::initialize()
   // Setup HTTP routes.
   Http http = Http(this);
 
+  route("/api/v1/scheduler",
+        Http::SCHEDULER_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.scheduler(request);
+        });
   route("/health",
         Http::HEALTH_HELP,
         [http](const process::http::Request& request) {
@@ -753,20 +778,25 @@ void Master::initialize()
         [http](const process::http::Request& request) {
           return http.redirect(request);
         });
+  route("/reserve",
+        Http::RESERVE_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.reserve(request);
+        });
+  // TODO(ijimenez): Remove this endpoint at the end of the
+  // deprecation cycle on 0.26.
   route("/roles.json",
         Http::ROLES_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
           return http.roles(request);
         });
-
-  // TODO(vinod): "/shutdown" endpoint is deprecated in favor of
-  // "/teardown". Remove this endpoint in 0.24.0.
-  route("/shutdown",
-        Http::SHUTDOWN_HELP,
+  route("/roles",
+        Http::ROLES_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
-          return http.teardown(request);
+          return http.roles(request);
         });
   route("/teardown",
         Http::TEARDOWN_HELP,
@@ -774,14 +804,21 @@ void Master::initialize()
           Http::log(request);
           return http.teardown(request);
         });
-
   route("/slaves",
         Http::SLAVES_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
           return http.slaves(request);
         });
+  // TODO(ijimenez): Remove this endpoint at the end of the
+  // deprecation cycle on 0.26.
   route("/state.json",
+        Http::STATE_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.state(request);
+        });
+  route("/state",
         Http::STATE_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
@@ -793,11 +830,49 @@ void Master::initialize()
           Http::log(request);
           return http.stateSummary(request);
         });
+  // TODO(ijimenez): Remove this endpoint at the end of the
+  // deprecation cycle.
   route("/tasks.json",
         Http::TASKS_HELP,
         [http](const process::http::Request& request) {
           Http::log(request);
           return http.tasks(request);
+        });
+  route("/tasks",
+        Http::TASKS_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.tasks(request);
+        });
+  route("/maintenance/schedule",
+        Http::MAINTENANCE_SCHEDULE_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.maintenanceSchedule(request);
+        });
+  route("/maintenance/status",
+        Http::MAINTENANCE_STATUS_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.maintenanceStatus(request);
+        });
+  route("/machine/down",
+        Http::MACHINE_DOWN_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.machineDown(request);
+        });
+  route("/machine/up",
+        Http::MACHINE_UP_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.machineUp(request);
+        });
+  route("/unreserve",
+        Http::UNRESERVE_HELP,
+        [http](const process::http::Request& request) {
+          Http::log(request);
+          return http.unreserve(request);
         });
 
   // Provide HTTP assets from a "webui" directory. This is either
@@ -876,6 +951,13 @@ void Master::finalize()
       removeOffer(offer);
     }
 
+    // Remove inverse offers.
+    foreach (InverseOffer* inverseOffer, utils::copy(slave->inverseOffers)) {
+      // We don't need to update the allocator because the slave has already
+      // been removed.
+      removeInverseOffer(inverseOffer);
+    }
+
     // Terminate the slave observer.
     terminate(slave->observer);
     wait(slave->observer);
@@ -901,12 +983,14 @@ void Master::finalize()
     CHECK(framework->tasks.empty());
     CHECK(framework->executors.empty());
     CHECK(framework->offers.empty());
+    CHECK(framework->inverseOffers.empty());
 
     delete framework;
   }
   frameworks.registered.clear();
 
   CHECK(offers.empty());
+  CHECK(inverseOffers.empty());
 
   foreachvalue (Future<Option<string>> future, authenticating) {
     // NOTE: This is necessary during tests because a copy of
@@ -945,42 +1029,32 @@ void Master::finalize()
 }
 
 
+void Master::exited(const FrameworkID& frameworkId, const HttpConnection& http)
+{
+  foreachvalue (Framework* framework, frameworks.registered) {
+    if (framework->http.isSome() &&
+        framework->http.get().writer == http.writer) {
+      CHECK_EQ(frameworkId, framework->id());
+      _exited(framework);
+      return;
+    }
+
+    // If the framework has reconnected, the writer will not match
+    // above, and we will have a framework with a matching id.
+    if (frameworkId == framework->id()) {
+      LOG(INFO) << "Ignoring disconnection for framework "
+                << *framework << " as it has already reconnected";
+      return;
+    }
+  }
+}
+
+
 void Master::exited(const UPID& pid)
 {
   foreachvalue (Framework* framework, frameworks.registered) {
     if (framework->pid == pid) {
-      LOG(INFO) << "Framework " << *framework << " disconnected";
-
-      // Disconnect the framework.
-      disconnect(framework);
-
-      // Set 'failoverTimeout' to the default and update only if the
-      // input is valid.
-      Try<Duration> failoverTimeout_ =
-        Duration::create(FrameworkInfo().failover_timeout());
-      CHECK_SOME(failoverTimeout_);
-      Duration failoverTimeout = failoverTimeout_.get();
-
-      failoverTimeout_ =
-        Duration::create(framework->info.failover_timeout());
-      if (failoverTimeout_.isSome()) {
-        failoverTimeout = failoverTimeout_.get();
-      } else {
-        LOG(WARNING) << "Using the default value for 'failover_timeout' because"
-                     << "the input value is invalid: "
-                     << failoverTimeout_.error();
-      }
-
-      LOG(INFO) << "Giving framework " << *framework << " "
-                << failoverTimeout << " to failover";
-
-      // Delay dispatching a message to ourselves for the timeout.
-      delay(failoverTimeout,
-            self(),
-            &Master::frameworkFailoverTimeout,
-            framework->id(),
-            framework->reregisteredTime);
-
+      _exited(framework);
       return;
     }
   }
@@ -1037,6 +1111,44 @@ void Master::exited(const UPID& pid)
                    << "checkpointing slave " << *slave;
     }
   }
+}
+
+
+void Master::_exited(Framework* framework)
+{
+  LOG(INFO) << "Framework " << *framework << " disconnected";
+
+  // Disconnect the framework.
+  disconnect(framework);
+
+  // Set 'failoverTimeout' to the default and update only if the
+  // input is valid.
+  Try<Duration> failoverTimeout_ =
+    Duration::create(FrameworkInfo().failover_timeout());
+
+  CHECK_SOME(failoverTimeout_);
+  Duration failoverTimeout = failoverTimeout_.get();
+
+  failoverTimeout_ =
+    Duration::create(framework->info.failover_timeout());
+
+  if (failoverTimeout_.isSome()) {
+    failoverTimeout = failoverTimeout_.get();
+  } else {
+    LOG(WARNING) << "Using the default value for 'failover_timeout' because"
+                 << "the input value is invalid: "
+                 << failoverTimeout_.error();
+  }
+
+  LOG(INFO) << "Giving framework " << *framework << " "
+            << failoverTimeout << " to failover";
+
+  // Delay dispatching a message to ourselves for the timeout.
+  delay(failoverTimeout,
+        self(),
+        &Master::frameworkFailoverTimeout,
+        framework->id(),
+        framework->reregisteredTime);
 }
 
 
@@ -1287,6 +1399,16 @@ Future<Nothing> Master::_recover(const Registry& registry)
           &Self::recoveredSlavesTimeout,
           registry);
 
+  // Save the maintenance schedule.
+  foreach (const mesos::maintenance::Schedule& schedule, registry.schedules()) {
+    maintenance.schedules.push_back(schedule);
+  }
+
+  // Save the machine info for each machine.
+  foreach (const Registry::Machine& machine, registry.machines().machines()) {
+    machines[machine.info().id()] = Machine(machine.info());
+  }
+
   // Recovery is now complete!
   LOG(INFO) << "Recovered " << registry.slaves().slaves().size() << " slaves"
             << " from the Registry (" << Bytes(registry.ByteSize()) << ")"
@@ -1510,51 +1632,11 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
 }
 
 
-// Helper to convert authorization result to Future<Option<Error>>.
-static Future<Option<Error>> _authorize(const string& message, bool authorized)
+Future<bool> Master::authorizeFramework(
+    const FrameworkInfo& frameworkInfo)
 {
-  if (authorized) {
-    return None();
-  }
-
-  return Error(message);
-}
-
-
-Future<Option<Error>> Master::validate(
-    const FrameworkInfo& frameworkInfo,
-    const UPID& from)
-{
-  if (flags.authenticate_frameworks) {
-    if (!authenticated.contains(from)) {
-      // This could happen if another authentication request came
-      // through before we are here or if a framework tried to
-      // (re-)register without authentication.
-      return Error("Framework at " + stringify(from) + " is not authenticated");
-    } else if (frameworkInfo.has_principal() &&
-               frameworkInfo.principal() != authenticated[from]) {
-      return Error(
-          "Framework principal '" + frameworkInfo.principal() +
-          "' does not match authenticated principal '" + authenticated[from]  +
-          "'");
-    } else if (!frameworkInfo.has_principal()) {
-      // We allow an authenticated framework to not specify a
-      // principal in FrameworkInfo but we'd prefer if it did so we log
-      // a WARNING here when this happens.
-      LOG(WARNING) << "Framework at " << from << " (authenticated as '"
-                   << authenticated[from]
-                   << "') does not specify principal in its FrameworkInfo";
-    }
-  }
-
-  // TODO(vinod): Deprecate this in favor of ACLs.
-  if (!roles.contains(frameworkInfo.role())) {
-    return Error("Role '" + frameworkInfo.role() + "' is invalid");
-  }
-
   if (authorizer.isNone()) {
-    // Authorization is disabled.
-    return None();
+    return true; // Authorization is disabled.
   }
 
   LOG(INFO) << "Authorizing framework principal '" << frameworkInfo.principal()
@@ -1569,10 +1651,36 @@ Future<Option<Error>> Master::validate(
   }
   request.mutable_roles()->add_values(frameworkInfo.role());
 
-  return authorizer.get()->authorize(request).then(
-      lambda::bind(&_authorize,
-                   "Not authorized to use role '" + frameworkInfo.role() + "'",
-                   lambda::_1));
+  return authorizer.get()->authorize(request);
+}
+
+
+Option<Error> Master::validateFrameworkAuthentication(
+    const FrameworkInfo& frameworkInfo,
+    const UPID& from)
+{
+  if (authenticating.contains(from)) {
+    return Error("Re-authentication in progress");
+  }
+
+  if (flags.authenticate_frameworks && !authenticated.contains(from)) {
+    // This could happen if another authentication request came
+    // through before we are here or if a framework tried to
+    // (re-)register without authentication.
+    return Error("Framework at " + stringify(from) + " is not authenticated");
+  }
+
+  // TODO(bmahler): Currently the scheduler driver does not
+  // set 'principal', so we allow frameworks to omit it.
+  if (frameworkInfo.has_principal() &&
+      authenticated.contains(from) &&
+      frameworkInfo.principal() != authenticated[from]) {
+    return Error("Framework principal '" + frameworkInfo.principal() + "'"
+                 " does not match authenticated principal"
+                 " '" + authenticated[from]  + "'");
+  }
+
+  return None();
 }
 
 
@@ -1612,27 +1720,15 @@ void Master::receive(
 {
   // TODO(vinod): Add metrics for calls.
 
-  if (call.type() == scheduler::Call::SUBSCRIBE) {
-    if (!call.has_subscribe()) {
-      drop(from, call, "Expecting 'subscribe' to be present");
-      return;
-    }
+  Option<Error> error = validation::scheduler::call::validate(call);
 
-    if (!(call.subscribe().framework_info().id() == call.framework_id())) {
-      drop(from,
-           call,
-           "Framework id in the call doesn't match the framework id"
-           " in the 'subscribe' message");
-      return;
-    }
-
-    subscribe(from, call.subscribe());
+  if (error.isSome()) {
+    drop(from, call, error.get().message);
     return;
   }
 
-  // All calls except SUBSCRIBE should have framework id set.
-  if (!call.has_framework_id()) {
-    drop(from, call, "Expecting framework id to be present");
+  if (call.type() == scheduler::Call::SUBSCRIBE) {
+    subscribe(from, call.subscribe());
     return;
   }
 
@@ -1645,87 +1741,60 @@ void Master::receive(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     drop(from, call, "Call is not from registered framework");
     return;
   }
 
   switch (call.type()) {
-    case scheduler::Call::TEARDOWN: {
-      removeFramework(framework);
+    case scheduler::Call::TEARDOWN:
+      teardown(framework);
       break;
-    }
 
-    case scheduler::Call::ACCEPT: {
-      if (!call.has_accept()) {
-        drop(from, call, "Expecting 'accept' to be present");
-        return;
-      }
+    case scheduler::Call::ACCEPT:
       accept(framework, call.accept());
       break;
-    }
 
-    case scheduler::Call::DECLINE: {
-      if (!call.has_decline()) {
-        drop(from, call, "Expecting 'decline' to be present");
-        return;
-      }
+    case scheduler::Call::DECLINE:
       decline(framework, call.decline());
       break;
-    }
 
-    case scheduler::Call::REVIVE: {
+    case scheduler::Call::REVIVE:
       revive(framework);
       break;
-    }
 
-    case scheduler::Call::KILL: {
-      if (!call.has_kill()) {
-        drop(from, call, "Expecting 'kill' to be present");
-        return;
-      }
+    case scheduler::Call::KILL:
       kill(framework, call.kill());
       break;
-    }
 
-    case scheduler::Call::SHUTDOWN: {
-      if (!call.has_shutdown()) {
-        drop(from, call, "Expecting 'shutdown' to be present");
-        return;
-      }
+    case scheduler::Call::SHUTDOWN:
       shutdown(framework, call.shutdown());
       break;
-    }
 
-    case scheduler::Call::ACKNOWLEDGE: {
-      if (!call.has_acknowledge()) {
-        drop(from, call, "Expecting 'acknowledge' to be present");
-        return;
-      }
+    case scheduler::Call::ACKNOWLEDGE:
       acknowledge(framework, call.acknowledge());
       break;
-    }
 
-    case scheduler::Call::RECONCILE: {
-      if (!call.has_reconcile()) {
-        drop(from, call, "Expecting 'reconcile' to be present");
-        return;
-      }
+    case scheduler::Call::RECONCILE:
       reconcile(framework, call.reconcile());
       break;
-    }
 
-    case scheduler::Call::MESSAGE: {
-      if (!call.has_message()) {
-        drop(from, call, "Expecting 'message' to be present");
-        return;
-      }
+    case scheduler::Call::MESSAGE:
       message(framework, call.message());
       break;
-    }
+
+    case scheduler::Call::REQUEST:
+      request(framework, call.request());
+      break;
+
+    case scheduler::Call::SUPPRESS:
+      suppress(framework);
+      break;
 
     default:
-      drop(from, call, "Unknown call type");
+      // Should be caught during call validation above.
+      LOG(FATAL) << "Unexpected " << call.type() << " call"
+                 << " from framework " << call.framework_id() << " at " << from;
       break;
   }
 }
@@ -1737,112 +1806,23 @@ void Master::registerFramework(
 {
   ++metrics->messages_register_framework;
 
-  if (authenticating.contains(from)) {
-    // TODO(vinod): Consider dropping this request and fix the tests
-    // to deal with the drop. Currently there is a race between master
-    // realizing the framework is authenticated and framework sending
-    // a registration request. Dropping this message will cause the
-    // framework to retry slowing down the tests.
-    LOG(INFO) << "Queuing up registration request for"
-              << " framework '" << frameworkInfo.name() << "' at " << from
-              << " because authentication is still in progress";
+  if (frameworkInfo.has_id() && !frameworkInfo.id().value().empty()) {
+    const string error = "Registering with 'id' already set";
 
-    authenticating[from]
-      .onReady(defer(self(), &Self::registerFramework, from, frameworkInfo));
-    return;
-  }
-
-  LOG(INFO) << "Received registration request for"
-            << " framework '" << frameworkInfo.name() << "' at " << from;
-
-  validate(frameworkInfo, from)
-    .onAny(defer(self(),
-                 &Master::_registerFramework,
-                 from,
-                 frameworkInfo,
-                 lambda::_1));
-}
-
-
-void Master::_registerFramework(
-    const UPID& from,
-    const FrameworkInfo& frameworkInfo,
-    const Future<Option<Error>>& validationError)
-{
-  CHECK_READY(validationError);
-  if (validationError.get().isSome()) {
-    LOG(INFO) << "Refusing registration of framework '"
-              << frameworkInfo.name() << "' at " << from
-              << ": " << validationError.get().get().message;
-
-    FrameworkErrorMessage message;
-    message.set_message(validationError.get().get().message);
-    send(from, message);
-    return;
-  }
-
-  if (authenticating.contains(from)) {
-    // This could happen if a new authentication request came from the
-    // same framework while validation was in progress.
-    LOG(INFO) << "Dropping registration request for framework"
+    LOG(INFO) << "Refusing registration request of framework"
               << " '" << frameworkInfo.name() << "' at " << from
-              << " because new authentication attempt is in progress";
+              << ": " << error;
 
-    return;
-  }
-
-  if (flags.authenticate_frameworks && !authenticated.contains(from)) {
-    // This could happen if another (failed over) framework
-    // authenticated while validation was in progress.
-    LOG(INFO)
-      << "Dropping registration request for framework '" << frameworkInfo.name()
-      << "' at " << from << " because it is not authenticated";
-    return;
-  }
-
-  // Check if this framework is already registered (because it retries).
-  foreachvalue (Framework* framework, frameworks.registered) {
-    if (framework->pid == from) {
-      LOG(INFO) << "Framework " << *framework
-                << " already registered, resending acknowledgement";
-      FrameworkRegisteredMessage message;
-      message.mutable_framework_id()->MergeFrom(framework->id());
-      message.mutable_master_info()->MergeFrom(info_);
-      send(from, message);
-      return;
-    }
-  }
-
-  // Assign a new FrameworkID.
-  FrameworkInfo frameworkInfo_ = frameworkInfo;
-  frameworkInfo_.mutable_id()->CopyFrom(newFrameworkId());
-
-  Framework* framework = new Framework(frameworkInfo_, from);
-
-  LOG(INFO) << "Registering framework " << *framework
-            << " with checkpointing "
-            << (framework->info.checkpoint() ? "enabled" : "disabled")
-            << " and capabilities " << framework->info.capabilities();
-
-  // TODO(vinod): Deprecate this in favor of authorization.
-  bool rootSubmissions = flags.root_submissions;
-
-  if (framework->info.user() == "root" && rootSubmissions == false) {
-    LOG(INFO) << "Framework " << *framework << " registering as root, but "
-              << "root submissions are disabled on this cluster";
     FrameworkErrorMessage message;
-    message.set_message("User 'root' is not allowed to run frameworks");
+    message.set_message(error);
     send(from, message);
-    delete framework;
     return;
   }
 
-  addFramework(framework);
+  scheduler::Call::Subscribe call;
+  call.mutable_framework_info()->CopyFrom(frameworkInfo);
 
-  FrameworkRegisteredMessage message;
-  message.mutable_framework_id()->MergeFrom(framework->id());
-  message.mutable_master_info()->MergeFrom(info_);
-  send(framework->pid, message);
+  subscribe(from, call);
 }
 
 
@@ -1853,153 +1833,502 @@ void Master::reregisterFramework(
 {
   ++metrics->messages_reregister_framework;
 
-  if (!frameworkInfo.has_id() || frameworkInfo.id() == "") {
-    LOG(ERROR) << "Framework '" << frameworkInfo.name() << "' at " << from
-               << " re-registering without an id!";
+  if (!frameworkInfo.has_id() || frameworkInfo.id().value().empty()) {
+    const string error = "Re-registering without an 'id'";
+
+    LOG(INFO) << "Refusing re-registration request of framework"
+              << " '" << frameworkInfo.name() << "' at " << from
+              << ": " << error;
+
     FrameworkErrorMessage message;
-    message.set_message("Framework reregistering without a framework id");
+    message.set_message(error);
     send(from, message);
     return;
   }
 
-  if (authenticating.contains(from)) {
-    LOG(INFO) << "Queuing up re-registration request for framework "
-              << frameworkInfo.id() << " (" << frameworkInfo.name() << ") at "
-              << from << " because authentication is still in progress";
+  scheduler::Call::Subscribe call;
+  call.mutable_framework_info()->CopyFrom(frameworkInfo);
+  call.set_force(failover);
 
-    // TODO(vinod): Consider dropping this request and fix the tests
-    // to deal with the drop. See 'Master::registerFramework()' for
-    // more details.
-    authenticating[from]
-      .onReady(defer(self(),
-                     &Self::reregisterFramework,
-                     from,
-                     frameworkInfo,
-                     failover));
-    return;
+  subscribe(from, call);
+}
+
+
+void Master::subscribe(
+    HttpConnection http,
+    const scheduler::Call::Subscribe& subscribe)
+{
+  // TODO(anand): Authenticate the framework.
+
+  const FrameworkInfo& frameworkInfo = subscribe.framework_info();
+
+  LOG(INFO) << "Received subscription request for"
+            << " HTTP framework '" << frameworkInfo.name() << "'";
+
+  Option<Error> validationError = None();
+
+  // TODO(vinod): Deprecate this in favor of ACLs.
+  if (validationError.isNone() && !roles.contains(frameworkInfo.role())) {
+    validationError = Error("Role '" + frameworkInfo.role() + "' is not" +
+                            " present in the master's --roles");
   }
 
-  foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
-    if (framework->id() == frameworkInfo.id()) {
-      // This could happen if a framework tries to re-register after
-      // its failover timeout has elapsed or it unregistered itself
-      // by calling 'stop()' on the scheduler driver.
-      // TODO(vinod): Master should persist admitted frameworks to the
-      // registry and remove them from it after failover timeout.
-      LOG(WARNING) << "Completed framework " << *framework
-                   << " attempted to re-register";
-      FrameworkErrorMessage message;
-      message.set_message("Completed framework attempted to re-register");
-      send(from, message);
-      return;
+  // TODO(vinod): Deprecate this in favor of authorization.
+  if (validationError.isNone() &&
+      frameworkInfo.user() == "root" && !flags.root_submissions) {
+    validationError = Error("User 'root' is not allowed to run frameworks"
+                            " without --root_submissions set");
+  }
+
+  if (validationError.isNone() && frameworkInfo.has_id()) {
+    foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
+      if (framework->id() == frameworkInfo.id()) {
+        // This could happen if a framework tries to subscribe after
+        // its failover timeout has elapsed or it unregistered itself
+        // by calling 'stop()' on the scheduler driver.
+        //
+        // TODO(vinod): Master should persist admitted frameworks to the
+        // registry and remove them from it after failover timeout.
+        validationError = Error("Framework has been removed");
+        break;
+      }
     }
   }
 
-  LOG(INFO) << "Received re-registration request from framework "
-            << frameworkInfo.id() << " (" << frameworkInfo.name()
-            << ") at " << from;
+  if (validationError.isSome()) {
+    LOG(INFO) << "Refusing subscription of framework"
+              << " '" << frameworkInfo.name() << "': "
+              << validationError.get().message;
 
-  validate(frameworkInfo, from)
+    FrameworkErrorMessage message;
+    message.set_message(validationError.get().message);
+
+    http.send(message);
+    http.close();
+    return;
+  }
+
+  // Need to disambiguate for the compiler.
+  void (Master::*_subscribe)(
+      HttpConnection,
+      const scheduler::Call::Subscribe&,
+      const Future<bool>&) = &Self::_subscribe;
+
+  authorizeFramework(frameworkInfo)
     .onAny(defer(self(),
-                 &Master::_reregisterFramework,
-                 from,
-                 frameworkInfo,
-                 failover,
+                 _subscribe,
+                 http,
+                 subscribe,
                  lambda::_1));
 }
 
 
-void Master::_reregisterFramework(
-    const UPID& from,
-    const FrameworkInfo& frameworkInfo,
-    bool failover,
-    const Future<Option<Error>>& validationError)
+void Master::_subscribe(
+    HttpConnection http,
+    const scheduler::Call::Subscribe& subscribe,
+    const Future<bool>& authorized)
 {
-  CHECK_READY(validationError);
-  if (validationError.get().isSome()) {
-    LOG(INFO) << "Refusing re-registration of framework " << frameworkInfo.id()
-              << " (" << frameworkInfo.name() << ") " << " at " << from
-              << ": " << validationError.get().get().message;
+  const FrameworkInfo& frameworkInfo = subscribe.framework_info();
+
+  CHECK(!authorized.isDiscarded());
+
+  Option<Error> authorizationError = None();
+
+  if (authorized.isFailed()) {
+    authorizationError =
+      Error("Authorization failure: " + authorized.failure());
+  } else if (!authorized.get()) {
+    authorizationError =
+      Error("Not authorized to use role '" + frameworkInfo.role() + "'");
+  }
+
+  if (authorizationError.isSome()) {
+    LOG(INFO) << "Refusing subscription of framework"
+              << " '" << frameworkInfo.name() << "'"
+              << ": " << authorizationError.get().message;
 
     FrameworkErrorMessage message;
-    message.set_message(validationError.get().get().message);
-    send(from, message);
+    message.set_message(authorizationError.get().message);
+    http.send(message);
+    http.close();
     return;
   }
 
-  if (authenticating.contains(from)) {
-    // This could happen if a new authentication request came from the
-    // same framework while validation was in progress.
-    LOG(INFO) << "Dropping re-registration request of framework "
-              << frameworkInfo.id() << " (" << frameworkInfo.name() << ") at "
-              << from << " because new authentication attempt is in progress";
-    return;
-  }
-
-  if (flags.authenticate_frameworks && !authenticated.contains(from)) {
-    // This could happen if another (failed over) framework
-    // authenticated while validation was in progress. It is important
-    // to drop this because if this request is from a failing over
-    // framework (pid = from) we don't want to failover the already
-    // registered framework (pid = framework->pid).
-    LOG(INFO) << "Dropping re-registration request of framework "
-              << frameworkInfo.id() << " (" << frameworkInfo.name() << ") "
-              << " at " << from << " because it is not authenticated";
-    return;
-  }
-
-  LOG(INFO) << "Re-registering framework " << frameworkInfo.id()
-            << " (" << frameworkInfo.name() << ") " << " at " << from
-            << " with checkpointing "
+  LOG(INFO) << "Subscribing framework '" << frameworkInfo.name()
+            << "' with checkpointing "
             << (frameworkInfo.checkpoint() ? "enabled" : "disabled")
             << " and capabilities " << frameworkInfo.capabilities();
 
-  if (frameworks.registered.count(frameworkInfo.id()) > 0) {
-    // Using the "failover" of the scheduler allows us to keep a
+  if (!frameworkInfo.has_id() || frameworkInfo.id() == "") {
+    // If we are here the framework is subscribing for the first time.
+    // Assign a new FrameworkID.
+    FrameworkInfo frameworkInfo_ = frameworkInfo;
+    frameworkInfo_.mutable_id()->CopyFrom(newFrameworkId());
+
+    Framework* framework = new Framework(this, frameworkInfo_, http);
+
+    addFramework(framework);
+
+    FrameworkRegisteredMessage message;
+    message.mutable_framework_id()->MergeFrom(framework->id());
+    message.mutable_master_info()->MergeFrom(info_);
+    framework->send(message);
+
+    // Start the heartbeat after sending SUBSCRIBED event.
+    framework->heartbeat();
+
+    return;
+  }
+
+  // If we are here framework has already been assigned an id.
+  CHECK(!frameworkInfo.id().value().empty());
+
+  if (frameworks.registered.contains(frameworkInfo.id())) {
+    // Using the "force" field of the scheduler allows us to keep a
     // scheduler that got partitioned but didn't die (in ZooKeeper
     // speak this means didn't lose their session) and then
     // eventually tried to connect to this master even though
-    // another instance of their scheduler has reconnected. This
-    // might not be an issue in the future when the
-    // master/allocator launches the scheduler can get restarted
-    // (if necessary) by the master and the master will always
-    // know which scheduler is the correct one.
+    // another instance of their scheduler has reconnected.
 
     Framework* framework =
       CHECK_NOTNULL(frameworks.registered[frameworkInfo.id()]);
 
-    // Update the framework's info fields based on those passed during
+    // Note that if the scheduler is retrying we expect it
+    // to close its old connection. But, the master may not
+    // realize that the connection is closed before the retry
+    // occurs so we may kick off a scheduler unnecessarily.
+    if (framework->connected && !subscribe.force()) {
+      LOG(ERROR) << "Disallowing subscription attempt"
+                 << " of framework " << *framework
+                 << " because it is already connected";
+
+      FrameworkErrorMessage message;
+      message.set_message("Framework is already connected");
+
+      http.send(message);
+      http.close();
+      return;
+    }
+
+    // It is now safe to update the framework fields since the request is now
+    // guaranteed to be successful. We use the fields passed in during
     // re-registration.
     LOG(INFO) << "Updating info for framework " << framework->id();
-    framework->updateFrameworkInfo(frameworkInfo);
 
+    framework->updateFrameworkInfo(frameworkInfo);
     allocator->updateFramework(framework->id(), framework->info);
 
     framework->reregisteredTime = Clock::now();
 
-    if (failover) {
-      // We do not attempt to detect a duplicate re-registration
-      // message here because it is impossible to distinguish between
-      // a duplicate message, and a scheduler failover to the same
-      // pid, given the existing libprocess primitives (PID does not
-      // identify the libprocess Process instance).
-
-      // TODO(benh): Should we check whether the new scheduler has
-      // given us a different framework name, user name or executor
-      // info?
+    if (subscribe.force()) {
       LOG(INFO) << "Framework " << *framework << " failed over";
-      failoverFramework(framework, from);
-    } else if (from != framework->pid) {
-      LOG(ERROR)
-        << "Disallowing re-registration attempt of framework " << *framework
-        << " because it is not expected from " << from;
+      failoverFramework(framework, http);
+    } else {
+      LOG(INFO) << "Allowing framework " << *framework
+                << " to subscribe with an already used id";
+
+      // Convert the framework to an http framework if it was
+      // pid based in the past.
+      if (framework->pid.isSome()) {
+        framework->pid = None();
+      }
+
+      framework->connected = true;
+      framework->updateConnection(http);
+
+      http.closed()
+        .onAny(defer(self(), &Self::exited, framework->id(), http));
+
+      // Reactivate the framework.
+      if (!framework->active) {
+        framework->active = true;
+        allocator->activateFramework(framework->id());
+      }
+
+      FrameworkReregisteredMessage message;
+      message.mutable_framework_id()->MergeFrom(framework->id());
+      message.mutable_master_info()->MergeFrom(info_);
+      framework->send(message);
+
+      // Start the heartbeat after sending SUBSCRIBED event.
+      framework->heartbeat();
+    }
+  } else {
+    // We don't have a framework with this ID, so we must be a newly
+    // elected Mesos master to which either an existing scheduler or a
+    // failed-over one is connecting. Create a Framework object and add
+    // any tasks it has that have been reported by reconnecting slaves.
+    Framework* framework = new Framework(this, frameworkInfo, http);
+
+    // Add active tasks and executors to the framework.
+    foreachvalue (Slave* slave, slaves.registered) {
+      foreachvalue (Task* task, slave->tasks[framework->id()]) {
+        framework->addTask(task);
+      }
+      foreachvalue (const ExecutorInfo& executor,
+                    slave->executors[framework->id()]) {
+        framework->addExecutor(slave->id, executor);
+      }
+    }
+
+    // N.B. Need to add the framework _after_ we add its tasks
+    // (above) so that we can properly determine the resources it's
+    // currently using!
+    addFramework(framework);
+
+    FrameworkReregisteredMessage message;
+    message.mutable_framework_id()->MergeFrom(framework->id());
+    message.mutable_master_info()->MergeFrom(info_);
+    framework->send(message);
+
+    // Start the heartbeat after sending SUBSCRIBED event.
+    framework->heartbeat();
+  }
+
+  CHECK(frameworks.registered.contains(frameworkInfo.id()))
+    << "Unknown framework " << frameworkInfo.id()
+    << " (" << frameworkInfo.name() << ")";
+
+  // Broadcast the new framework pid to all the slaves. We have to
+  // broadcast because an executor might be running on a slave but
+  // it currently isn't running any tasks.
+  foreachvalue (Slave* slave, slaves.registered) {
+    UpdateFrameworkMessage message;
+    message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
+
+    // TODO(anand): We set 'pid' to UPID() for http frameworks
+    // as 'pid' was made optional in 0.24.0. In 0.25.0, we
+    // no longer have to set pid here for http frameowrks.
+    message.set_pid(UPID());
+    send(slave->pid, message);
+  }
+}
+
+
+void Master::subscribe(
+    const UPID& from,
+    const scheduler::Call::Subscribe& subscribe)
+{
+  const FrameworkInfo& frameworkInfo = subscribe.framework_info();
+
+  if (authenticating.contains(from)) {
+    // TODO(vinod): Consider dropping this request and fix the tests
+    // to deal with the drop. Currently there is a race between master
+    // realizing the framework is authenticated and framework sending
+    // a subscribe call. Dropping this message will cause the
+    // framework to retry slowing down the tests.
+    LOG(INFO) << "Queuing up SUBSCRIBE call for"
+              << " framework '" << frameworkInfo.name() << "' at " << from
+              << " because authentication is still in progress";
+
+    // Need to disambiguate for the compiler.
+    void (Master::*f)(const UPID&, const scheduler::Call::Subscribe&)
+      = &Self::subscribe;
+
+    authenticating[from]
+      .onReady(defer(self(), f, from, subscribe));
+    return;
+  }
+
+  Option<Error> validationError = None();
+
+  // TODO(vinod): Deprecate this in favor of ACLs.
+  if (validationError.isNone() && !roles.contains(frameworkInfo.role())) {
+    validationError = Error("Role '" + frameworkInfo.role() + "' is not" +
+                            " present in the master's --roles");
+  }
+
+  // TODO(vinod): Deprecate this in favor of authorization.
+  if (validationError.isNone() &&
+      frameworkInfo.user() == "root" && !flags.root_submissions) {
+    validationError = Error("User 'root' is not allowed to run frameworks"
+                            " without --root_submissions set");
+  }
+
+  if (validationError.isNone() && frameworkInfo.has_id()) {
+    foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
+      if (framework->id() == frameworkInfo.id()) {
+        // This could happen if a framework tries to subscribe after
+        // its failover timeout has elapsed or it unregistered itself
+        // by calling 'stop()' on the scheduler driver.
+        //
+        // TODO(vinod): Master should persist admitted frameworks to the
+        // registry and remove them from it after failover timeout.
+        validationError = Error("Framework has been removed");
+        break;
+      }
+    }
+  }
+
+  // Note that re-authentication errors are already handled above.
+  if (validationError.isNone()) {
+    validationError = validateFrameworkAuthentication(frameworkInfo, from);
+  }
+
+  if (validationError.isSome()) {
+    LOG(INFO) << "Refusing subscription of framework"
+              << " '" << frameworkInfo.name() << "' at " << from << ": "
+              << validationError.get().message;
+
+    FrameworkErrorMessage message;
+    message.set_message(validationError.get().message);
+    send(from, message);
+    return;
+  }
+
+  LOG(INFO) << "Received SUBSCRIBE call for"
+            << " framework '" << frameworkInfo.name() << "' at " << from;
+
+  // We allow an authenticated framework to not specify a principal
+  // in FrameworkInfo but we'd prefer if it did so we log a WARNING
+  // here when it happens.
+  if (!frameworkInfo.has_principal() && authenticated.contains(from)) {
+    LOG(WARNING) << "Framework at " << from
+                 << " (authenticated as '" << authenticated[from] << "')"
+                 << " does not set 'principal' in FrameworkInfo";
+  }
+
+  // Need to disambiguate for the compiler.
+  void (Master::*_subscribe)(
+      const UPID&,
+      const scheduler::Call::Subscribe&,
+      const Future<bool>&) = &Self::_subscribe;
+
+  authorizeFramework(frameworkInfo)
+    .onAny(defer(self(),
+                 _subscribe,
+                 from,
+                 subscribe,
+                 lambda::_1));
+}
+
+
+void Master::_subscribe(
+    const UPID& from,
+    const scheduler::Call::Subscribe& subscribe,
+    const Future<bool>& authorized)
+{
+  const FrameworkInfo& frameworkInfo = subscribe.framework_info();
+
+  CHECK(!authorized.isDiscarded());
+
+  Option<Error> authorizationError = None();
+
+  if (authorized.isFailed()) {
+    authorizationError =
+      Error("Authorization failure: " + authorized.failure());
+  } else if (!authorized.get()) {
+    authorizationError =
+      Error("Not authorized to use role '" + frameworkInfo.role() + "'");
+  }
+
+  if (authorizationError.isSome()) {
+    LOG(INFO) << "Refusing subscription of framework"
+              << " '" << frameworkInfo.name() << "' at " << from
+              << ": " << authorizationError.get().message;
+
+    FrameworkErrorMessage message;
+    message.set_message(authorizationError.get().message);
+
+    send(from, message);
+    return;
+  }
+
+  // At this point, authentications errors will be due to
+  // re-authentication during the authorization process,
+  // so we drop the subscription.
+  Option<Error> authenticationError =
+    validateFrameworkAuthentication(frameworkInfo, from);
+
+  if (authenticationError.isSome()) {
+    LOG(INFO) << "Dropping SUBSCRIBE call for framework"
+              << " '" << frameworkInfo.name() << "' at " << from
+              << ": " << authenticationError.get().message;
+    return;
+  }
+
+  LOG(INFO) << "Subscribing framework " << frameworkInfo.name()
+            << " with checkpointing "
+            << (frameworkInfo.checkpoint() ? "enabled" : "disabled")
+            << " and capabilities " << frameworkInfo.capabilities();
+
+  if (!frameworkInfo.has_id() || frameworkInfo.id().value().empty()) {
+    // If we are here the framework is subscribing for the first time.
+    // Check if this framework is already subscribed (because it retries).
+    foreachvalue (Framework* framework, frameworks.registered) {
+      if (framework->pid == from) {
+        LOG(INFO) << "Framework " << *framework
+                  << " already subscribed, resending acknowledgement";
+        FrameworkRegisteredMessage message;
+        message.mutable_framework_id()->MergeFrom(framework->id());
+        message.mutable_master_info()->MergeFrom(info_);
+        framework->send(message);
+        return;
+      }
+    }
+
+    // Assign a new FrameworkID.
+    FrameworkInfo frameworkInfo_ = frameworkInfo;
+    frameworkInfo_.mutable_id()->CopyFrom(newFrameworkId());
+
+    Framework* framework = new Framework(this, frameworkInfo_, from);
+
+    addFramework(framework);
+
+    FrameworkRegisteredMessage message;
+    message.mutable_framework_id()->MergeFrom(framework->id());
+    message.mutable_master_info()->MergeFrom(info_);
+    framework->send(message);
+
+    return;
+  }
+
+  // If we are here framework has already been assigned an id.
+  CHECK(!frameworkInfo.id().value().empty());
+
+  if (frameworks.registered.contains(frameworkInfo.id())) {
+    // Using the "force" field of the scheduler allows us to keep a
+    // scheduler that got partitioned but didn't die (in ZooKeeper
+    // speak this means didn't lose their session) and then
+    // eventually tried to connect to this master even though
+    // another instance of their scheduler has reconnected.
+
+    Framework* framework =
+      CHECK_NOTNULL(frameworks.registered[frameworkInfo.id()]);
+
+    // Test for the error case first.
+    if ((framework->pid != from) && !subscribe.force()) {
+      LOG(ERROR) << "Disallowing subscription attempt of"
+                 << " framework " << *framework
+                 << " because it is not expected from " << from;
+
       FrameworkErrorMessage message;
       message.set_message("Framework failed over");
       send(from, message);
       return;
+    }
+
+    // It is now safe to update the framework fields since the request is now
+    // guaranteed to be successful. We use the fields passed in during
+    // re-registration.
+    LOG(INFO) << "Updating info for framework " << framework->id();
+
+    framework->updateFrameworkInfo(frameworkInfo);
+    allocator->updateFramework(framework->id(), framework->info);
+
+    framework->reregisteredTime = Clock::now();
+
+    if (subscribe.force()) {
+      // TODO(vinod): Now that the scheduler pid is unique we don't
+      // need to call 'failoverFramework()' if the pid hasn't changed
+      // (i.e., duplicate message). Instead we can just send the
+      // FrameworkReregisteredMessage back and activate the framework
+      // if necesssary.
+      LOG(INFO) << "Framework " << *framework << " failed over";
+      failoverFramework(framework, from);
     } else {
       LOG(INFO) << "Allowing framework " << *framework
-                << " to re-register with an already used id";
+                << " to subscribe with an already used id";
 
       // Remove any offers sent to this framework.
       // NOTE: We need to do this because the scheduler might have
@@ -2014,6 +2343,21 @@ void Master::_reregisterFramework(
         removeOffer(offer, true); // Rescind.
       }
 
+      // Also remove inverse offers.
+      foreach (InverseOffer* inverseOffer,
+               utils::copy(framework->inverseOffers)) {
+        allocator->updateInverseOffer(
+            inverseOffer->slave_id(),
+            inverseOffer->framework_id(),
+            UnavailableResources{
+                inverseOffer->resources(),
+                inverseOffer->unavailability()},
+            None());
+
+        removeInverseOffer(inverseOffer, true); // Rescind.
+      }
+
+      // TODO(bmahler): Shouldn't this re-link with the scheduler?
       framework->connected = true;
 
       // Reactivate the framework.
@@ -2027,7 +2371,7 @@ void Master::_reregisterFramework(
       FrameworkReregisteredMessage message;
       message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
       message.mutable_master_info()->MergeFrom(info_);
-      send(from, message);
+      framework->send(message);
       return;
     }
   } else {
@@ -2035,9 +2379,7 @@ void Master::_reregisterFramework(
     // elected Mesos master to which either an existing scheduler or a
     // failed-over one is connecting. Create a Framework object and add
     // any tasks it has that have been reported by reconnecting slaves.
-    Framework* framework = new Framework(frameworkInfo, from);
-
-    // TODO(benh): Check for root submissions like above!
+    Framework* framework = new Framework(this, frameworkInfo, from);
 
     // Add active tasks and executors to the framework.
     foreachvalue (Slave* slave, slaves.registered) {
@@ -2062,7 +2404,7 @@ void Master::_reregisterFramework(
     FrameworkRegisteredMessage message;
     message.mutable_framework_id()->MergeFrom(framework->id());
     message.mutable_master_info()->MergeFrom(info_);
-    send(framework->pid, message);
+    framework->send(message);
   }
 
   CHECK(frameworks.registered.contains(frameworkInfo.id()))
@@ -2071,31 +2413,12 @@ void Master::_reregisterFramework(
 
   // Broadcast the new framework pid to all the slaves. We have to
   // broadcast because an executor might be running on a slave but
-  // it currently isn't running any tasks. This could be a
-  // potential scalability issue ...
+  // it currently isn't running any tasks.
   foreachvalue (Slave* slave, slaves.registered) {
     UpdateFrameworkMessage message;
     message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
     message.set_pid(from);
     send(slave->pid, message);
-  }
-
-  return;
-}
-
-
-void Master::subscribe(
-    const UPID& from,
-    const scheduler::Call::Subscribe& subscribe)
-{
-  const FrameworkInfo& frameworkInfo = subscribe.framework_info();
-
-  // TODO(vinod): Instead of calling '(re-)registerFramework()' from
-  // here refactor those methods to call 'subscribe()'.
-  if (frameworkInfo.has_id() || frameworkInfo.id() == "") {
-    registerFramework(from, frameworkInfo);
-  } else {
-    reregisterFramework(from, frameworkInfo, subscribe.force());
   }
 }
 
@@ -2104,14 +2427,12 @@ void Master::unregisterFramework(
     const UPID& from,
     const FrameworkID& frameworkId)
 {
-  ++metrics->messages_unregister_framework;
-
   LOG(INFO) << "Asked to unregister framework " << frameworkId;
 
   Framework* framework = getFramework(frameworkId);
   if (framework != NULL) {
     if (framework->pid == from) {
-      removeFramework(framework);
+      teardown(framework);
     } else {
       LOG(WARNING)
         << "Ignoring unregister framework message for framework " << *framework
@@ -2136,7 +2457,7 @@ void Master::deactivateFramework(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring deactivate framework message for framework " << *framework
       << " because it is not expected from " << from;
@@ -2155,9 +2476,17 @@ void Master::disconnect(Framework* framework)
 
   framework->connected = false;
 
-  // Remove the framework from authenticated. This is safe because
-  // a framework will always reauthenticate before (re-)registering.
-  authenticated.erase(framework->pid);
+  if (framework->pid.isSome()) {
+    // Remove the framework from authenticated. This is safe because
+    // a framework will always reauthenticate before (re-)registering.
+    authenticated.erase(framework->pid.get());
+  } else {
+    CHECK_SOME(framework->http);
+
+    // Close the HTTP connection, which may already have
+    // been closed due to scheduler disconnection.
+    framework->http.get().close();
+  }
 
   deactivate(framework);
 }
@@ -2179,7 +2508,21 @@ void Master::deactivate(Framework* framework)
   foreach (Offer* offer, utils::copy(framework->offers)) {
     allocator->recoverResources(
         offer->framework_id(), offer->slave_id(), offer->resources(), None());
+
     removeOffer(offer, true); // Rescind.
+  }
+
+  // Remove the framework's inverse offers.
+  foreach (InverseOffer* inverseOffer, utils::copy(framework->inverseOffers)) {
+    allocator->updateInverseOffer(
+        inverseOffer->slave_id(),
+        inverseOffer->framework_id(),
+        UnavailableResources{
+            inverseOffer->resources(),
+            inverseOffer->unavailability()},
+        None());
+
+    removeInverseOffer(inverseOffer, true); // Rescind.
   }
 }
 
@@ -2220,6 +2563,19 @@ void Master::deactivate(Slave* slave)
 
     removeOffer(offer, true); // Rescind!
   }
+
+  // Remove and rescind inverse offers.
+  foreach (InverseOffer* inverseOffer, utils::copy(slave->inverseOffers)) {
+    allocator->updateInverseOffer(
+        slave->id,
+        inverseOffer->framework_id(),
+        UnavailableResources{
+            inverseOffer->resources(),
+            inverseOffer->unavailability()},
+        None());
+
+    removeInverseOffer(inverseOffer, true); // Rescind!
+  }
 }
 
 
@@ -2228,8 +2584,6 @@ void Master::resourceRequest(
     const FrameworkID& frameworkId,
     const vector<Request>& requests)
 {
-  ++metrics->messages_resource_request;
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == NULL) {
@@ -2239,15 +2593,47 @@ void Master::resourceRequest(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring resource request message from framework " << *framework
       << " because it is not expected from " << from;
     return;
   }
 
-  LOG(INFO) << "Requesting resources for framework " << *framework;
-  allocator->requestResources(frameworkId, requests);
+  scheduler::Call::Request call;
+  foreach (const Request& request, requests) {
+    call.add_requests()->CopyFrom(request);
+  }
+
+  request(framework, call);
+}
+
+
+void Master::request(
+    Framework* framework,
+    const scheduler::Call::Request& request)
+{
+  CHECK_NOTNULL(framework);
+
+  LOG(INFO) << "Processing REQUEST call for framework " << *framework;
+
+  ++metrics->messages_resource_request;
+
+  allocator->requestResources(
+      framework->id(),
+      google::protobuf::convert(request.requests()));
+}
+
+
+void Master::suppress(Framework* framework)
+{
+  CHECK_NOTNULL(framework);
+
+  LOG(INFO) << "Processing SUPPRESS call for framework " << *framework;
+
+  ++metrics->messages_suppress_offers;
+
+  allocator->suppressOffers(framework->id());
 }
 
 
@@ -2258,12 +2644,6 @@ void Master::launchTasks(
     const Filters& filters,
     const vector<OfferID>& offerIds)
 {
-  if (!tasks.empty()) {
-    ++metrics->messages_launch_tasks;
-  } else {
-    ++metrics->messages_decline_offers;
-  }
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == NULL) {
@@ -2275,12 +2655,11 @@ void Master::launchTasks(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring launch tasks message for offers " << stringify(offerIds)
-      << " of framework " << frameworkId << " from '" << from
-      << "' because it is not from the registered framework '"
-      << framework->pid << "'";
+      << " from '" << from << "' because it is not from the"
+      << " registered framework " << *framework;
 
     return;
   }
@@ -2321,8 +2700,7 @@ Future<bool> Master::authorizeTask(
     Framework* framework)
 {
   if (authorizer.isNone()) {
-    // Authorization is disabled.
-    return true;
+    return true; // Authorization is disabled.
   }
 
   // Authorize the task.
@@ -2397,7 +2775,9 @@ Resources Master::addTask(
     t->mutable_executor_id()->MergeFrom(executorId.get());
   }
 
-  t->mutable_labels()->MergeFrom(task.labels());
+  if (task.has_labels()) {
+    t->mutable_labels()->MergeFrom(task.labels());
+  }
   if (task.has_discovery()) {
     t->mutable_discovery()->MergeFrom(task.discovery());
   }
@@ -2413,7 +2793,19 @@ void Master::accept(
     Framework* framework,
     const scheduler::Call::Accept& accept)
 {
-  // TODO(jieyu): Update metrics for ACCEPT calls.
+  CHECK_NOTNULL(framework);
+
+  foreach (const Offer::Operation& operation, accept.operations()) {
+    if (operation.type() == Offer::Operation::LAUNCH) {
+      if (operation.launch().task_infos().size() > 0) {
+        ++metrics->messages_launch_tasks;
+      } else {
+        ++metrics->messages_decline_offers;
+      }
+    }
+
+    // TODO(jieyu): Add metrics for non launch operations.
+  }
 
   // TODO(bmahler): We currently only support using multiple offers
   // for a single slave.
@@ -2431,6 +2823,11 @@ void Master::accept(
     // validation failed, return resources to the allocator.
     foreach (const OfferID& offerId, accept.offer_ids()) {
       Offer* offer = getOffer(offerId);
+
+      // Since we re-use `OfferID`s, it is possible to arrive here with either
+      // a resource offer, or an inverse offer. We first try as a resource offer
+      // and if that fails, then we assume it is an inverse offer. This is
+      // correct as those are currently the only 2 ways to get an `OfferID`.
       if (offer != NULL) {
         slaveId = offer->slave_id();
         offeredResources += offer->resources();
@@ -2443,7 +2840,35 @@ void Master::accept(
               None());
         }
         removeOffer(offer);
+        continue;
       }
+
+      // Try it as an inverse offer. If this fails then the offer is no longer
+      // valid.
+      InverseOffer* inverseOffer = getInverseOffer(offerId);
+      if (inverseOffer != NULL) {
+        mesos::master::InverseOfferStatus status;
+        status.set_status(mesos::master::InverseOfferStatus::ACCEPT);
+        status.mutable_framework_id()->CopyFrom(inverseOffer->framework_id());
+        status.mutable_timestamp()->CopyFrom(protobuf::getCurrentTime());
+
+        allocator->updateInverseOffer(
+            inverseOffer->slave_id(),
+            inverseOffer->framework_id(),
+            UnavailableResources{
+                inverseOffer->resources(),
+                inverseOffer->unavailability()},
+            status,
+            accept.filters());
+
+        removeInverseOffer(inverseOffer);
+        continue;
+      }
+
+      // If the offer was neither in our offer or inverse offer sets, then this
+      // offer is no longer valid.
+      LOG(WARNING) << "Ignoring accept of offer " << offerId
+                   << " since it is no longer valid";
     }
   }
 
@@ -2640,7 +3065,7 @@ void Master::_accept(
                   << operation.reserve().resources() << " from framework "
                   << *framework << " to slave " << *slave;
 
-        applyOfferOperation(framework, slave, operation);
+        apply(framework, slave, operation);
         break;
       }
 
@@ -2665,7 +3090,7 @@ void Master::_accept(
                   << operation.unreserve().resources() << " from framework "
                   << *framework << " to slave " << *slave;
 
-        applyOfferOperation(framework, slave, operation);
+        apply(framework, slave, operation);
         break;
       }
 
@@ -2691,7 +3116,7 @@ void Master::_accept(
                   << operation.create().volumes() << " from framework "
                   << *framework << " to slave " << *slave;
 
-        applyOfferOperation(framework, slave, operation);
+        apply(framework, slave, operation);
         break;
       }
 
@@ -2717,7 +3142,7 @@ void Master::_accept(
                   << operation.create().volumes() << " from framework "
                   << *framework << " to slave " << *slave;
 
-        applyOfferOperation(framework, slave, operation);
+        apply(framework, slave, operation);
         break;
       }
 
@@ -2833,8 +3258,11 @@ void Master::_accept(
 
             RunTaskMessage message;
             message.mutable_framework()->MergeFrom(framework->info);
-            message.mutable_framework_id()->MergeFrom(framework->id());
-            message.set_pid(framework->pid);
+
+            // TODO(anand): We set 'pid' to UPID() for http frameworks
+            // as 'pid' was made optional in 0.24.0. In 0.25.0, we
+            // no longer have to set pid here for http frameowrks.
+            message.set_pid(framework->pid.getOrElse(UPID()));
             message.mutable_task()->MergeFrom(task_);
 
             if (HookManager::hooksAvailable()) {
@@ -2878,8 +3306,14 @@ void Master::decline(
   LOG(INFO) << "Processing DECLINE call for offers: " << decline.offer_ids()
             << " for framework " << *framework;
 
+  ++metrics->messages_decline_offers;
+
   //  Return resources to the allocator.
   foreach (const OfferID& offerId, decline.offer_ids()) {
+    // Since we re-use `OfferID`s, it is possible to arrive here with either a
+    // resource offer, or an inverse offer. We first try as a resource offer and
+    // if that fails, then we assume it is an inverse offer. This is correct as
+    // those are currently the only 2 ways to get an `OfferID`.
     Offer* offer = getOffer(offerId);
     if (offer != NULL) {
       allocator->recoverResources(
@@ -2889,18 +3323,41 @@ void Master::decline(
           decline.filters());
 
       removeOffer(offer);
-    } else {
-      LOG(WARNING) << "Ignoring decline of offer " << offerId
-                   << " since it is no longer valid";
+      continue;
     }
+
+    // Try it as an inverse offer. If this fails then the offer is no longer
+    // valid.
+    InverseOffer* inverseOffer = getInverseOffer(offerId);
+    if (inverseOffer != NULL) { // If this is an inverse offer.
+      mesos::master::InverseOfferStatus status;
+      status.set_status(mesos::master::InverseOfferStatus::DECLINE);
+      status.mutable_framework_id()->CopyFrom(inverseOffer->framework_id());
+      status.mutable_timestamp()->CopyFrom(protobuf::getCurrentTime());
+
+      allocator->updateInverseOffer(
+          inverseOffer->slave_id(),
+          inverseOffer->framework_id(),
+          UnavailableResources{
+              inverseOffer->resources(),
+              inverseOffer->unavailability()},
+          status,
+          decline.filters());
+
+      removeInverseOffer(inverseOffer);
+      continue;
+    }
+
+    // If the offer was neither in our offer or inverse offer sets, then this
+    // offer is no longer valid.
+    LOG(WARNING) << "Ignoring decline of offer " << offerId
+                 << " since it is no longer valid";
   }
 }
 
 
 void Master::reviveOffers(const UPID& from, const FrameworkID& frameworkId)
 {
-  ++metrics->messages_revive_offers;
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == NULL) {
@@ -2910,7 +3367,7 @@ void Master::reviveOffers(const UPID& from, const FrameworkID& frameworkId)
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring revive offers message for framework " << *framework
       << " because it is not expected from " << from;
@@ -2926,6 +3383,9 @@ void Master::revive(Framework* framework)
   CHECK_NOTNULL(framework);
 
   LOG(INFO) << "Processing REVIVE call for framework " << *framework;
+
+  ++metrics->messages_revive_offers;
+
   allocator->reviveOffers(framework->id());
 }
 
@@ -2938,8 +3398,6 @@ void Master::killTask(
   LOG(INFO) << "Asked to kill task " << taskId
             << " of framework " << frameworkId;
 
-  ++metrics->messages_kill_task;
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == NULL) {
@@ -2949,7 +3407,7 @@ void Master::killTask(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring kill task message for task " << taskId << " of framework "
       << *framework << " because it is not expected from " << from;
@@ -2966,6 +3424,8 @@ void Master::killTask(
 void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
 {
   CHECK_NOTNULL(framework);
+
+  ++metrics->messages_kill_task;
 
   const TaskID& taskId = kill.task_id();
   const Option<SlaveID> slaveId =
@@ -3049,8 +3509,6 @@ void Master::statusUpdateAcknowledgement(
     const TaskID& taskId,
     const string& uuid)
 {
-  metrics->messages_status_update_acknowledgement++;
-
   // TODO(bmahler): Consider adding a message validator abstraction
   // for the master that takes care of all this boilerplate. Ideally
   // by the time we process messages in the critical master code, we
@@ -3069,7 +3527,7 @@ void Master::statusUpdateAcknowledgement(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring status update acknowledgement " << UUID::fromBytes(uuid)
       << " for task " << taskId << " of framework " << *framework
@@ -3092,6 +3550,8 @@ void Master::acknowledge(
     const scheduler::Call::Acknowledge& acknowledge)
 {
   CHECK_NOTNULL(framework);
+
+  metrics->messages_status_update_acknowledgement++;
 
   const SlaveID slaveId = acknowledge.slave_id();
   const TaskID taskId = acknowledge.task_id();
@@ -3171,20 +3631,18 @@ void Master::schedulerMessage(
     const ExecutorID& executorId,
     const string& data)
 {
-  ++metrics->messages_framework_to_executor;
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == NULL) {
-    LOG(WARNING)
-      << "Ignoring framework message for executor " << executorId
-      << " of framework " << frameworkId
-      << " because the framework cannot be found";
+    LOG(WARNING) << "Ignoring framework message"
+                 << " for executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " because the framework cannot be found";
     metrics->invalid_framework_to_executor_messages++;
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring framework message for executor " << executorId
       << " of framework " << *framework
@@ -3202,11 +3660,77 @@ void Master::schedulerMessage(
 }
 
 
+void Master::executorMessage(
+    const UPID& from,
+    const SlaveID& slaveId,
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId,
+    const string& data)
+{
+  metrics->messages_executor_to_framework++;
+
+  if (slaves.removed.get(slaveId).isSome()) {
+    // If the slave is removed, we have already informed
+    // frameworks that its tasks were LOST, so the slave
+    // should shut down.
+    LOG(WARNING) << "Ignoring executor message"
+                 << " from executor" << " '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " on removed slave " << slaveId
+                 << " ; asking slave to shutdown";
+
+    ShutdownMessage message;
+    message.set_message("Executor message from unknown slave");
+    reply(message);
+    metrics->invalid_executor_to_framework_messages++;
+    return;
+  }
+
+  // The slave should (re-)register with the master before
+  // forwarding executor messages.
+  if (!slaves.registered.contains(slaveId)) {
+    LOG(WARNING) << "Ignoring executor message"
+                 << " from executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " on unknown slave " << slaveId;
+    metrics->invalid_executor_to_framework_messages++;
+    return;
+  }
+
+  Slave* slave = slaves.registered.get(slaveId);
+  CHECK_NOTNULL(slave);
+
+  Framework* framework = getFramework(frameworkId);
+
+  if (framework == NULL) {
+    LOG(WARNING) << "Not forwarding executor message"
+                 << " for executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " on slave " << *slave
+                 << " because the framework is unknown";
+    metrics->invalid_executor_to_framework_messages++;
+    return;
+  }
+
+  ExecutorToFrameworkMessage message;
+  message.mutable_slave_id()->MergeFrom(slaveId);
+  message.mutable_framework_id()->MergeFrom(frameworkId);
+  message.mutable_executor_id()->MergeFrom(executorId);
+  message.set_data(data);
+
+  framework->send(message);
+
+  metrics->valid_executor_to_framework_messages++;
+}
+
+
 void Master::message(
     Framework* framework,
     const scheduler::Call::Message& message)
 {
   CHECK_NOTNULL(framework);
+
+  metrics->messages_framework_to_executor++;
 
   Slave* slave = slaves.registered.get(message.slave_id());
 
@@ -3270,6 +3794,24 @@ void Master::registerSlave(
                  << " because it is not authenticated";
     ShutdownMessage message;
     message.set_message("Slave is not authenticated");
+    send(from, message);
+    return;
+  }
+
+  MachineID machineId;
+  machineId.set_hostname(slaveInfo.hostname());
+  machineId.set_ip(stringify(from.address.ip));
+
+  // Slaves are not allowed to register while the machine they are on is in
+  // `DOWN` mode.
+  if (machines.contains(machineId) &&
+      machines[machineId].info.mode() == MachineInfo::DOWN) {
+    LOG(WARNING) << "Refusing registration of slave at " << from
+                 << " because the machine '" << machineId << "' that it is "
+                 << "running on is `DOWN`";
+
+    ShutdownMessage message;
+    message.set_message("Machine is `DOWN`");
     send(from, message);
     return;
   }
@@ -3365,9 +3907,14 @@ void Master::_registerSlave(
         stringify(slaveInfo.id()));
     send(pid, message);
   } else {
+    MachineID machineId;
+    machineId.set_hostname(slaveInfo.hostname());
+    machineId.set_ip(stringify(pid.address.ip));
+
     Slave* slave = new Slave(
         slaveInfo,
         pid,
+        machineId,
         version.empty() ? Option<string>::none() : version,
         Clock::now(),
         checkpointedResources);
@@ -3432,6 +3979,24 @@ void Master::reregisterSlave(
     return;
   }
 
+  MachineID machineId;
+  machineId.set_hostname(slaveInfo.hostname());
+  machineId.set_ip(stringify(from.address.ip));
+
+  // Slaves are not allowed to register while the machine they are on is in
+  // 'DOWN` mode.
+  if (machines.contains(machineId) &&
+      machines[machineId].info.mode() == MachineInfo::DOWN) {
+    LOG(WARNING) << "Refusing re-registration of slave at " << from
+                 << " because the machine '" << machineId << "' that it is "
+                 << "running on is `DOWN`";
+
+    ShutdownMessage message;
+    message.set_message("Machine is `DOWN`");
+    send(from, message);
+    return;
+  }
+
   if (slaves.removed.get(slaveInfo.id()).isSome()) {
     // To compensate for the case where a non-strict registrar is
     // being used, we explicitly deny removed slaves from
@@ -3461,6 +4026,26 @@ void Master::reregisterSlave(
     // this will be handled by orthogonal security measures like key
     // based authentication).
     LOG(INFO) << "Re-registering slave " << *slave;
+
+    // We don't allow re-registering this way with a different IP or
+    // hostname. This is because maintenance is scheduled at the
+    // machine level; so we would need to re-validate the slave's
+    // unavailability if the machine it is running on changed.
+    if (slave->pid.address.ip != from.address.ip ||
+        slave->info.hostname() != slaveInfo.hostname()) {
+      LOG(WARNING) << "Slave " << slaveInfo.id() << " at " << from
+                   << " (" << slaveInfo.hostname() << ") attempted to "
+                   << "re-register with different IP / hostname; expected "
+                   << slave->pid.address.ip << " (" << slave->info.hostname()
+                   << ") shutting it down";
+
+      ShutdownMessage message;
+      message.set_message(
+          "Slave attempted to re-register with different IP / hostname");
+
+      send(from, message);
+      return;
+    }
 
     // Update the slave pid and relink to it.
     // NOTE: Re-linking the slave here always rather than only when
@@ -3563,9 +4148,14 @@ void Master::_reregisterSlave(
     send(pid, message);
   } else {
     // Re-admission succeeded.
+    MachineID machineId;
+    machineId.set_hostname(slaveInfo.hostname());
+    machineId.set_ip(stringify(pid.address.ip));
+
     Slave* slave = new Slave(
         slaveInfo,
         pid,
+        machineId,
         version.empty() ? Option<string>::none() : version,
         Clock::now(),
         checkpointedResources,
@@ -3601,16 +4191,23 @@ void Master::__reregisterSlave(Slave* slave, const vector<Task>& tasks)
   CHECK_NOTNULL(slave);
 
   // Send the latest framework pids to the slave.
-  hashset<UPID> pids;
+  hashset<FrameworkID> ids;
+
   foreach (const Task& task, tasks) {
     Framework* framework = getFramework(task.framework_id());
-    if (framework != NULL && !pids.contains(framework->pid)) {
+
+    if (framework != NULL && !ids.contains(framework->id())) {
       UpdateFrameworkMessage message;
       message.mutable_framework_id()->MergeFrom(framework->id());
-      message.set_pid(framework->pid);
+
+      // TODO(anand): We set 'pid' to UPID() for http frameworks
+      // as 'pid' was made optional in 0.24.0. In 0.25.0, we
+      // no longer have to set pid here for http frameowrks.
+      message.set_pid(framework->pid.getOrElse(UPID()));
+
       send(slave->pid, message);
 
-      pids.insert(framework->pid);
+      ids.insert(framework->id());
     }
   }
 
@@ -3681,9 +4278,8 @@ void Master::updateSlave(
   LOG(INFO) << "Received update of slave " << *slave << " with total"
             << " oversubscribed resources " <<  oversubscribedResources;
 
-  // First, rescind any oustanding offers with revocable resources.
-  // NOTE: Need a copy of offers because the offers are removed inside
-  // the loop.
+  // First, rescind any outstanding offers with revocable resources.
+  // NOTE: Need a copy of offers because the offers are removed inside the loop.
   foreach (Offer* offer, utils::copy(slave->offers)) {
     const Resources offered = offer->resources();
     if (!offered.revocable().empty()) {
@@ -3698,11 +4294,84 @@ void Master::updateSlave(
     }
   }
 
+  // NOTE: We don't need to rescind inverse offers here as they are unrelated to
+  // oversubscription.
+
   slave->totalResources -= slave->totalResources.revocable();
   slave->totalResources += oversubscribedResources.revocable();
 
   // Now, update the allocator with the new estimate.
   allocator->updateSlave(slaveId, oversubscribedResources);
+}
+
+
+void Master::updateUnavailability(
+    const MachineID& machineId,
+    const Option<Unavailability>& unavailability)
+{
+  if (unavailability.isSome()) {
+    machines[machineId].info.mutable_unavailability()->CopyFrom(
+        unavailability.get());
+  } else {
+    machines[machineId].info.clear_unavailability();
+  }
+
+  // TODO(jmlvanre): Only update allocator and rescind offers if the
+  // unavailability has actually changed.
+  if (machines.contains(machineId)) {
+    // For every slave on this machine, update the allocator.
+    foreach (const SlaveID& slaveId, machines[machineId].slaves) {
+      // The slave should not be in the machines mapping if it is removed.
+      CHECK(slaves.removed.get(slaveId).isNone());
+
+      // The slave should be registered if it is in the machines mapping.
+      CHECK(slaves.registered.contains(slaveId));
+
+      Slave* slave = CHECK_NOTNULL(slaves.registered.get(slaveId));
+
+      if (unavailability.isSome()) {
+        // TODO(jmlvanre): Add stream operator for unavailability.
+        LOG(INFO) << "Updating unavailability of slave " << *slave
+                  << ", starting at "
+                  << Nanoseconds(unavailability.get().start().nanoseconds());
+      } else {
+        LOG(INFO) << "Removing unavailability of slave " << *slave;
+      }
+
+      // Remove and rescind offers since we want to inform frameworks of the
+      // unavailability change as soon as possible.
+      foreach (Offer* offer, utils::copy(slave->offers)) {
+        allocator->recoverResources(
+            offer->framework_id(), slave->id, offer->resources(), None());
+
+        removeOffer(offer, true); // Rescind!
+      }
+
+      // Remove and rescind inverse offers since the allocator will send new
+      // inverse offers for the updated unavailability.
+      foreach (InverseOffer* inverseOffer, utils::copy(slave->inverseOffers)) {
+        allocator->updateInverseOffer(
+            slave->id,
+            inverseOffer->framework_id(),
+            UnavailableResources{
+                inverseOffer->resources(),
+                inverseOffer->unavailability()},
+            None());
+
+        removeInverseOffer(inverseOffer, true); // Rescind!
+      }
+
+      // We remove / resind all the offers first so that any calls to the
+      // allocator to modify its internal state are queued before the update of
+      // the unavailability in the allocator. We do this so that the allocator's
+      // state can start from a "clean slate" for the new unavailability.
+      // NOTE: Any calls from the Allocator back into the master, for example
+      // `offer()`, are guaranteed to happen after this function exits due to
+      // the Actor pattern.
+
+      allocator->updateUnavailability(slaveId, unavailability);
+    }
+  }
 }
 
 
@@ -3794,7 +4463,7 @@ void Master::forward(
   StatusUpdateMessage message;
   message.mutable_update()->MergeFrom(update);
   message.set_pid(acknowledgee);
-  send(framework->pid, message);
+  framework->send(message);
 }
 
 
@@ -3822,14 +4491,15 @@ void Master::exitedExecutor(
     return;
   }
 
-  // Only update master's internal data structures here for proper
-  // accounting. The TASK_LOST updates are handled by the slave.
   if (!slaves.registered.contains(slaveId)) {
     LOG(WARNING) << "Ignoring exited executor '" << executorId
                  << "' of framework " << frameworkId
                  << " on unknown slave " << slaveId;
     return;
   }
+
+  // Only update master's internal data structures here for proper
+  // accounting. The TASK_LOST updates are handled by the slave.
 
   Slave* slave = slaves.registered.get(slaveId);
   CHECK_NOTNULL(slave);
@@ -3865,7 +4535,7 @@ void Master::exitedExecutor(
   message.mutable_slave_id()->CopyFrom(slaveId);
   message.set_status(status);
 
-  send(framework->pid, message);
+  framework->send(message);
 }
 
 
@@ -3874,6 +4544,8 @@ void Master::shutdown(
     const scheduler::Call::Shutdown& shutdown)
 {
   CHECK_NOTNULL(framework);
+
+  // TODO(vinod): Add a metric for executor shutdowns.
 
   if (!slaves.registered.contains(shutdown.slave_id())) {
     LOG(WARNING) << "Unable to shutdown executor '" << shutdown.executor_id()
@@ -3943,8 +4615,6 @@ void Master::reconcileTasks(
     const FrameworkID& frameworkId,
     const std::vector<TaskStatus>& statuses)
 {
-  ++metrics->messages_reconcile_tasks;
-
   Framework* framework = getFramework(frameworkId);
   if (framework == NULL) {
     LOG(WARNING) << "Unknown framework " << frameworkId << " at " << from
@@ -3952,7 +4622,7 @@ void Master::reconcileTasks(
     return;
   }
 
-  if (from != framework->pid) {
+  if (framework->pid != from) {
     LOG(WARNING)
       << "Ignoring reconcile tasks message for framework " << *framework
       << " because it is not expected from " << from;
@@ -3968,6 +4638,8 @@ void Master::_reconcileTasks(
     const vector<TaskStatus>& statuses)
 {
   CHECK_NOTNULL(framework);
+
+  ++metrics->messages_reconcile_tasks;
 
   if (statuses.empty()) {
     // Implicit reconciliation.
@@ -3994,7 +4666,7 @@ void Master::_reconcileTasks(
       // much logging.
       StatusUpdateMessage message;
       message.mutable_update()->CopyFrom(update);
-      send(framework->pid, message);
+      framework->send(message);
     }
 
     foreachvalue (Task* task, framework->tasks) {
@@ -4027,7 +4699,7 @@ void Master::_reconcileTasks(
       // much logging.
       StatusUpdateMessage message;
       message.mutable_update()->CopyFrom(update);
-      send(framework->pid, message);
+      framework->send(message);
     }
 
     return;
@@ -4131,7 +4803,7 @@ void Master::_reconcileTasks(
       // much logging.
       StatusUpdateMessage message;
       message.mutable_update()->CopyFrom(update.get());
-      send(framework->pid, message);
+      framework->send(message);
     }
   }
 }
@@ -4229,11 +4901,20 @@ void Master::offer(const FrameworkID& frameworkId,
     // separate offers, so that rescinding offers with revocable
     // resources does not affect offers with regular resources.
 
+    // TODO(bmahler): Set "https" if only "https" is supported.
+    mesos::URL url;
+    url.set_scheme("http");
+    url.mutable_address()->set_hostname(slave->info.hostname());
+    url.mutable_address()->set_ip(stringify(slave->pid.address.ip));
+    url.mutable_address()->set_port(slave->pid.address.port);
+    url.set_path("/" + slave->pid.id);
+
     Offer* offer = new Offer();
     offer->mutable_id()->MergeFrom(newOfferId());
     offer->mutable_framework_id()->MergeFrom(framework->id());
     offer->mutable_slave_id()->MergeFrom(slave->id);
     offer->set_hostname(slave->info.hostname());
+    offer->mutable_url()->MergeFrom(url);
     offer->mutable_resources()->MergeFrom(offered);
     offer->mutable_attributes()->MergeFrom(slave->info.attributes());
 
@@ -4244,6 +4925,14 @@ void Master::offer(const FrameworkID& frameworkId,
       foreachkey (const ExecutorID& executorId, executors) {
         offer->add_executor_ids()->MergeFrom(executorId);
       }
+    }
+
+    // If the slave in this offer is planned to be unavailable due to
+    // maintenance in the future, then set the Unavailability.
+    CHECK(machines.contains(slave->machineId));
+    if (machines[slave->machineId].info.has_unavailability()) {
+      offer->mutable_unavailability()->CopyFrom(
+          machines[slave->machineId].info.unavailability());
     }
 
     offers[offer->id()] = offer;
@@ -4284,7 +4973,97 @@ void Master::offer(const FrameworkID& frameworkId,
   LOG(INFO) << "Sending " << message.offers().size()
             << " offers to framework " << *framework;
 
-  send(framework->pid, message);
+  framework->send(message);
+}
+
+
+void Master::inverseOffer(
+    const FrameworkID& frameworkId,
+    const hashmap<SlaveID, UnavailableResources>& resources)
+{
+  if (!frameworks.registered.contains(frameworkId) ||
+      !frameworks.registered[frameworkId]->active) {
+    LOG(INFO) << "Master ignoring inverse offers to framework " << frameworkId
+              << " because the framework has terminated or is inactive";
+    return;
+  }
+
+  // Create an inverse offer for each slave and add it to the message.
+  ResourceOffersMessage message;
+
+  Framework* framework = CHECK_NOTNULL(frameworks.registered[frameworkId]);
+  foreachpair (const SlaveID& slaveId,
+               const UnavailableResources& unavailableResources,
+               resources) {
+    if (!slaves.registered.contains(slaveId)) {
+      LOG(INFO)
+        << "Master ignoring inverse offers to framework " << *framework
+        << " because slave " << slaveId << " is not valid";
+      continue;
+    }
+
+    Slave* slave = slaves.registered.get(slaveId);
+    CHECK_NOTNULL(slave);
+
+    // This could happen if the allocator dispatched 'Master::inverseOffer'
+    // before the slave was deactivated in the allocator.
+    if (!slave->active) {
+      LOG(INFO)
+        << "Master ignoring inverse offers because slave " << *slave
+        << " is " << (slave->connected ? "deactivated" : "disconnected");
+
+      continue;
+    }
+
+    // TODO(bmahler): Set "https" if only "https" is supported.
+    mesos::URL url;
+    url.set_scheme("http");
+    url.mutable_address()->set_hostname(slave->info.hostname());
+    url.mutable_address()->set_ip(stringify(slave->pid.address.ip));
+    url.mutable_address()->set_port(slave->pid.address.port);
+    url.set_path("/" + slave->pid.id);
+
+    InverseOffer* inverseOffer = new InverseOffer();
+
+    // We use the same id generator as regular offers so that we can have unique
+    // ids accross both. This way we can re-use some of the `OfferID` only
+    // messages.
+    inverseOffer->mutable_id()->CopyFrom(newOfferId());
+    inverseOffer->mutable_framework_id()->CopyFrom(framework->id());
+    inverseOffer->mutable_slave_id()->CopyFrom(slave->id);
+    inverseOffer->mutable_url()->CopyFrom(url);
+    inverseOffer->mutable_unavailability()->CopyFrom(
+        unavailableResources.unavailability);
+
+    inverseOffers[inverseOffer->id()] = inverseOffer;
+
+    framework->addInverseOffer(inverseOffer);
+    slave->addInverseOffer(inverseOffer);
+
+    // TODO(jmlvanre): Do we want a separate flag for inverse offer
+    // timeout?
+    if (flags.offer_timeout.isSome()) {
+      // Rescind the inverse offer after the timeout elapses.
+      inverseOfferTimers[inverseOffer->id()] =
+        delay(flags.offer_timeout.get(),
+              self(),
+              &Self::inverseOfferTimeout,
+              inverseOffer->id());
+    }
+
+    // Add the inverse offer *AND* the corresponding slave's PID.
+    message.add_inverse_offers()->CopyFrom(*inverseOffer);
+    message.add_pids(slave->pid);
+  }
+
+  if (message.inverse_offers().size() == 0) {
+    return;
+  }
+
+  LOG(INFO) << "Sending " << message.inverse_offers().size()
+            << " inverse offers to framework " << *framework;
+
+  framework->send(message);
 }
 
 
@@ -4599,7 +5378,16 @@ void Master::addFramework(Framework* framework)
 
   frameworks.registered[framework->id()] = framework;
 
-  link(framework->pid);
+  if (framework->pid.isSome()) {
+    link(framework->pid.get());
+  } else {
+    CHECK_SOME(framework->http);
+
+    HttpConnection http = framework->http.get();
+
+    http.closed()
+      .onAny(defer(self(), &Self::exited, framework->id(), http));
+  }
 
   // Enforced by Master::registerFramework.
   CHECK(roles.contains(framework->info.role()))
@@ -4621,24 +5409,67 @@ void Master::addFramework(Framework* framework)
   // If the framework is authenticated, its principal should be in
   // 'authenticated'. Otherwise look if it's supplied in
   // FrameworkInfo.
-  Option<string> principal = authenticated.get(framework->pid);
-  if (principal.isNone() && framework->info.has_principal()) {
-    principal = framework->info.principal();
-  }
+  if (framework->pid.isSome()) {
+    Option<string> principal = authenticated.get(framework->pid.get());
+    if (principal.isNone() && framework->info.has_principal()) {
+      principal = framework->info.principal();
+    }
 
-  CHECK(!frameworks.principals.contains(framework->pid));
-  frameworks.principals.put(framework->pid, principal);
+    CHECK(!frameworks.principals.contains(framework->pid.get()));
+    frameworks.principals.put(framework->pid.get(), principal);
 
-  // Export framework metrics if a principal is specified.
-  if (principal.isSome()) {
-    // Create new framework metrics if this framework is the first
-    // one of this principal. Otherwise existing metrics are reused.
-    if (!metrics->frameworks.contains(principal.get())) {
-      metrics->frameworks.put(
-          principal.get(),
-          Owned<Metrics::Frameworks>(new Metrics::Frameworks(principal.get())));
+    // Export framework metrics if a principal is specified.
+    if (principal.isSome()) {
+      // Create new framework metrics if this framework is the first
+      // one of this principal. Otherwise existing metrics are reused.
+      if (!metrics->frameworks.contains(principal.get())) {
+        metrics->frameworks.put(
+            principal.get(),
+            Owned<Metrics::Frameworks>(
+              new Metrics::Frameworks(principal.get())));
+      }
     }
   }
+}
+
+
+void Master::failoverFramework(Framework* framework, const HttpConnection& http)
+{
+  // Notify the old connected framework that it has failed over.
+  // Note that this may be a retry in which case we'll shut down
+  // the scheduler unnecessarily.
+  if (framework->connected) {
+    FrameworkErrorMessage message;
+    message.set_message("Framework failed over");
+    framework->send(message);
+  }
+
+  // If this is an upgrade, clear the authentication related data.
+  if (framework->pid.isSome()) {
+    authenticated.erase(framework->pid.get());
+
+    CHECK(frameworks.principals.contains(framework->pid.get()));
+    Option<string> principal = frameworks.principals[framework->pid.get()];
+
+    frameworks.principals.erase(framework->pid.get());
+
+    // Remove the metrics for the principal if this framework is the
+    // last one with this principal.
+    if (principal.isSome() &&
+        !frameworks.principals.containsValue(principal.get())) {
+      CHECK(metrics->frameworks.contains(principal.get()));
+      metrics->frameworks.erase(principal.get());
+    }
+  }
+
+  framework->updateConnection(http);
+  http.closed()
+    .onAny(defer(self(), &Self::exited, framework->id(), http));
+
+  _failoverFramework(framework);
+
+  // Start the heartbeat after sending SUBSCRIBED event.
+  framework->heartbeat();
 }
 
 
@@ -4646,7 +5477,7 @@ void Master::addFramework(Framework* framework)
 // event of a scheduler failover.
 void Master::failoverFramework(Framework* framework, const UPID& newPid)
 {
-  const UPID oldPid = framework->pid;
+  const Option<UPID> oldPid = framework->pid;
 
   // There are a few failover cases to consider:
   //   1. The pid has changed. In this case we definitely want to
@@ -4658,24 +5489,31 @@ void Master::failoverFramework(Framework* framework, const UPID& newPid)
   //          scheduler as it is necessarily dead.
   //      2.2 This is a duplicate message. In this case, the scheduler
   //          has not failed over, so we do not want to shut it down.
-  if (oldPid != newPid) {
+  if (oldPid.isSome() && oldPid != newPid) {
     FrameworkErrorMessage message;
     message.set_message("Framework failed over");
-    send(oldPid, message);
+    framework->send(message);
   }
 
-  // TODO(benh): unlink(oldPid);
-
-  framework->pid = newPid;
+  framework->updateConnection(newPid);
   link(newPid);
 
-  // The scheduler driver safely ignores any duplicate registration
-  // messages, so we don't need to compare the old and new pids here.
-  FrameworkRegisteredMessage message;
-  message.mutable_framework_id()->MergeFrom(framework->id());
-  message.mutable_master_info()->MergeFrom(info_);
-  send(newPid, message);
+  _failoverFramework(framework);
 
+  CHECK_SOME(framework->pid);
+
+  // Update the principal mapping for this framework, which is
+  // needed to keep the per-principal framework metrics accurate.
+  if (oldPid.isSome() && frameworks.principals.contains(oldPid.get())) {
+    frameworks.principals.erase(oldPid.get());
+  }
+
+  frameworks.principals[newPid] = authenticated.get(newPid);
+}
+
+
+void Master::_failoverFramework(Framework* framework)
+{
   // Remove the framework's offers (if they weren't removed before).
   // We do this after we have updated the pid and sent the framework
   // registered message so that the allocator can immediately re-offer
@@ -4683,9 +5521,24 @@ void Master::failoverFramework(Framework* framework, const UPID& newPid)
   foreach (Offer* offer, utils::copy(framework->offers)) {
     allocator->recoverResources(
         offer->framework_id(), offer->slave_id(), offer->resources(), None());
+
     removeOffer(offer);
   }
 
+  // Also remove the inverse offers.
+  foreach (InverseOffer* inverseOffer, utils::copy(framework->inverseOffers)) {
+    allocator->updateInverseOffer(
+        inverseOffer->slave_id(),
+        inverseOffer->framework_id(),
+        UnavailableResources{
+            inverseOffer->resources(),
+            inverseOffer->unavailability()},
+        None());
+
+    removeInverseOffer(inverseOffer);
+  }
+
+  // Reconnect and reactivate the framework.
   framework->connected = true;
 
   // Reactivate the framework.
@@ -4696,12 +5549,24 @@ void Master::failoverFramework(Framework* framework, const UPID& newPid)
     allocator->activateFramework(framework->id());
   }
 
-  // 'Failover' the framework's metrics. i.e., change the lookup key
-  // for its metrics to 'newPid'.
-  if (oldPid != newPid && frameworks.principals.contains(oldPid)) {
-    frameworks.principals[newPid] = frameworks.principals[oldPid];
-    frameworks.principals.erase(oldPid);
-  }
+  // The scheduler driver safely ignores any duplicate registration
+  // messages, so we don't need to compare the old and new pids here.
+  FrameworkRegisteredMessage message;
+  message.mutable_framework_id()->MergeFrom(framework->id());
+  message.mutable_master_info()->MergeFrom(info_);
+  framework->send(message);
+}
+
+
+void Master::teardown(Framework* framework)
+{
+  CHECK_NOTNULL(framework);
+
+  LOG(INFO) << "Processing TEARDOWN call for framework " << *framework;
+
+  ++metrics->messages_unregister_framework;
+
+  removeFramework(framework);
 }
 
 
@@ -4771,7 +5636,21 @@ void Master::removeFramework(Framework* framework)
         offer->slave_id(),
         offer->resources(),
         None());
+
     removeOffer(offer);
+  }
+
+  // Also remove the inverse offers.
+  foreach (InverseOffer* inverseOffer, utils::copy(framework->inverseOffers)) {
+    allocator->updateInverseOffer(
+        inverseOffer->slave_id(),
+        inverseOffer->framework_id(),
+        UnavailableResources{
+            inverseOffer->resources(),
+            inverseOffer->unavailability()},
+        None());
+
+    removeInverseOffer(inverseOffer);
   }
 
   // Remove the framework's executors for correct resource accounting.
@@ -4791,6 +5670,8 @@ void Master::removeFramework(Framework* framework)
 
   // TODO(benh): unlink(framework->pid);
 
+  // TODO(anand): For http frameworks, close the connection.
+
   framework->unregisteredTime = Clock::now();
 
   // The completedFramework buffer now owns the framework pointer.
@@ -4802,19 +5683,20 @@ void Master::removeFramework(Framework* framework)
 
   roles[framework->info.role()]->removeFramework(framework);
 
-  // Remove the framework from authenticated.
-  authenticated.erase(framework->pid);
+  // TODO(anand): This only works for pid based frameworks. We would
+  // need similar authentication logic for http frameworks.
+  if (framework->pid.isSome()) {
+    authenticated.erase(framework->pid.get());
 
-  CHECK(frameworks.principals.contains(framework->pid));
-  const Option<string> principal = frameworks.principals[framework->pid];
+    CHECK(frameworks.principals.contains(framework->pid.get()));
+    Option<string> principal = frameworks.principals[framework->pid.get()];
 
-  frameworks.principals.erase(framework->pid);
+    frameworks.principals.erase(framework->pid.get());
 
-  // Remove the framework's message counters.
-  if (principal.isSome()) {
     // Remove the metrics for the principal if this framework is the
     // last one with this principal.
-    if (!frameworks.principals.containsValue(principal.get())) {
+    if (principal.isSome() &&
+        !frameworks.principals.containsValue(principal.get())) {
       CHECK(metrics->frameworks.contains(principal.get()));
       metrics->frameworks.erase(principal.get());
     }
@@ -4883,6 +5765,10 @@ void Master::addSlave(
 
   link(slave->pid);
 
+  // Map the slave to the machine it is running on.
+  CHECK(!machines[slave->machineId].slaves.contains(slave->id));
+  machines[slave->machineId].slaves.insert(slave->id);
+
   // Set up an observer for the slave.
   slave->observer = new SlaveObserver(
       slave->pid,
@@ -4931,8 +5817,9 @@ void Master::addSlave(
   // TODO(vinod): Reconcile the notion of a completed framework across the
   // master and slave.
   foreach (const Archive::Framework& completedFramework, completedFrameworks) {
-    const FrameworkID& frameworkId = completedFramework.framework_info().id();
-    Framework* framework = getFramework(frameworkId);
+    Framework* framework = getFramework(
+        completedFramework.framework_info().id());
+
     foreach (const Task& task, completedFramework.tasks()) {
       if (framework != NULL) {
         VLOG(2) << "Re-adding completed task " << task.task_id()
@@ -4950,9 +5837,18 @@ void Master::addSlave(
     }
   }
 
+  CHECK(machines.contains(slave->machineId));
+
+  // Only set unavailability if the protobuf has one set.
+  Option<Unavailability> unavailability = None();
+  if (machines[slave->machineId].info.has_unavailability()) {
+    unavailability = machines[slave->machineId].info.unavailability();
+  }
+
   allocator->addSlave(
       slave->id,
       slave->info,
+      unavailability,
       slave->totalResources,
       slave->usedResources);
 }
@@ -5020,11 +5916,25 @@ void Master::removeSlave(
     removeOffer(offer, true); // Rescind!
   }
 
+  // Remove inverse offers because sending them for a slave that is
+  // gone doesn't make sense.
+  foreach (InverseOffer* inverseOffer, utils::copy(slave->inverseOffers)) {
+    // We don't need to update the allocator because we've already called
+    // `RemoveSlave()`.
+    // Remove and rescind inverse offers.
+    removeInverseOffer(inverseOffer, true); // Rescind!
+  }
+
   // Mark the slave as being removed.
   slaves.removing.insert(slave->id);
   slaves.registered.remove(slave);
   slaves.removed.put(slave->id, Nothing());
   authenticated.erase(slave->pid);
+
+  // Remove the slave from the `machines` mapping.
+  CHECK(machines.contains(slave->machineId));
+  CHECK(machines[slave->machineId].slaves.contains(slave->id));
+  machines[slave->machineId].slaves.erase(slave->id);
 
   // Kill the slave observer.
   terminate(slave->observer);
@@ -5098,7 +6008,12 @@ void Master::_removeSlave(
               << "after recovering";
     LostSlaveMessage message;
     message.mutable_slave_id()->MergeFrom(slaveInfo.id());
-    send(framework->pid, message);
+    framework->send(message);
+  }
+
+  // Finally, notify the `SlaveLost` hooks.
+  if (HookManager::hooksAvailable()) {
+    HookManager::masterSlaveLostHook(slaveInfo);
   }
 }
 
@@ -5149,7 +6064,7 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
   // Set the status update state and uuid for the task. Note that
   // master-generated updates are terminal and do not have a uuid
   // (in which case the master also calls removeTask()).
-  if (update.has_uuid()) {
+  if (update.has_uuid() && update.uuid() != "") {
     task->set_status_update_state(status.state());
     task->set_status_update_uuid(update.uuid());
   }
@@ -5282,7 +6197,7 @@ void Master::removeExecutor(
 }
 
 
-void Master::applyOfferOperation(
+void Master::apply(
     Framework* framework,
     Slave* slave,
     const Offer::Operation& operation)
@@ -5290,10 +6205,23 @@ void Master::applyOfferOperation(
   CHECK_NOTNULL(framework);
   CHECK_NOTNULL(slave);
 
-  allocator->updateAllocation(
-      framework->id(),
-      slave->id,
-      {operation});
+  allocator->updateAllocation(framework->id(), slave->id, {operation});
+
+  _apply(slave, operation);
+}
+
+
+Future<Nothing> Master::apply(Slave* slave, const Offer::Operation& operation)
+{
+  CHECK_NOTNULL(slave);
+
+  return allocator->updateAvailable(slave->id, {operation})
+    .onReady(defer(self(), &Master::_apply, slave, operation));
+}
+
+
+void Master::_apply(Slave* slave, const Offer::Operation& operation) {
+  CHECK_NOTNULL(slave);
 
   slave->apply(operation);
 
@@ -5343,7 +6271,7 @@ void Master::removeOffer(Offer* offer, bool rescind)
   if (rescind) {
     RescindResourceOfferMessage message;
     message.mutable_offer_id()->MergeFrom(offer->id());
-    send(framework->pid, message);
+    framework->send(message);
   }
 
   // Remove and cancel offer removal timers. Canceling the Timers is
@@ -5356,6 +6284,61 @@ void Master::removeOffer(Offer* offer, bool rescind)
   // Delete it.
   offers.erase(offer->id());
   delete offer;
+}
+
+
+void Master::inverseOfferTimeout(const OfferID& inverseOfferId)
+{
+  InverseOffer* inverseOffer = getInverseOffer(inverseOfferId);
+  if (inverseOffer != NULL) {
+    allocator->updateInverseOffer(
+        inverseOffer->slave_id(),
+        inverseOffer->framework_id(),
+        UnavailableResources{
+            inverseOffer->resources(),
+            inverseOffer->unavailability()},
+        None());
+
+    removeInverseOffer(inverseOffer, true);
+  }
+}
+
+
+void Master::removeInverseOffer(InverseOffer* inverseOffer, bool rescind)
+{
+  // Remove from framework.
+  Framework* framework = getFramework(inverseOffer->framework_id());
+  CHECK(framework != NULL)
+    << "Unknown framework " << inverseOffer->framework_id()
+    << " in the inverse offer " << inverseOffer->id();
+
+  framework->removeInverseOffer(inverseOffer);
+
+  // Remove from slave.
+  Slave* slave = slaves.registered.get(inverseOffer->slave_id());
+
+  CHECK(slave != NULL)
+    << "Unknown slave " << inverseOffer->slave_id()
+    << " in the inverse offer " << inverseOffer->id();
+
+  slave->removeInverseOffer(inverseOffer);
+
+  if (rescind) {
+    RescindResourceOfferMessage message;
+    message.mutable_offer_id()->CopyFrom(inverseOffer->id());
+    framework->send(message);
+  }
+
+  // Remove and cancel inverse offer removal timers. Canceling the Timers is
+  // only done to avoid having too many active Timers in libprocess.
+  if (inverseOfferTimers.contains(inverseOffer->id())) {
+    Clock::cancel(inverseOfferTimers[inverseOffer->id()]);
+    inverseOfferTimers.erase(inverseOffer->id());
+  }
+
+  // Delete it.
+  inverseOffers.erase(inverseOffer->id());
+  delete inverseOffer;
 }
 
 
@@ -5372,6 +6355,14 @@ Framework* Master::getFramework(const FrameworkID& frameworkId)
 Offer* Master::getOffer(const OfferID& offerId)
 {
   return offers.contains(offerId) ? offers[offerId] : NULL;
+}
+
+
+// TODO(bmahler): Consider killing this.
+InverseOffer* Master::getInverseOffer(const OfferID& inverseOfferId)
+{
+  return inverseOffers.contains(inverseOfferId) ?
+    inverseOffers[inverseOfferId] : NULL;
 }
 
 

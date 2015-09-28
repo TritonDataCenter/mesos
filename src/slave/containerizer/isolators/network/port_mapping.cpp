@@ -106,21 +106,19 @@ using std::vector;
 
 using filter::ip::PortRange;
 
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
+using mesos::slave::Isolator;
 
 // An old glibc might not have this symbol.
 #ifndef MNT_DETACH
 #define MNT_DETACH 2
 #endif
 
-
 namespace mesos {
 namespace internal {
 namespace slave {
-
-using mesos::slave::ExecutorRunState;
-using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
 
 // The minimum number of ephemeral ports a container should have.
 static const uint16_t MIN_EPHEMERAL_PORTS_SIZE = 16;
@@ -887,9 +885,19 @@ int PortMappingStatistics::execute()
         NET_ISOLATOR_BW_LIMIT,
         statistics.get(),
         &result);
-  } else {
-    cerr << "Failed to get the network statistics for "
-         << "the htb qdisc on " << eth0 << endl;
+  } else if (statistics.isNone()) {
+    // Traffic control statistics are only available when the
+    // container is created on a slave when the egress rate limit is
+    // on (i.e., egress_rate_limit_per_container flag is set). We
+    // can't just test for that flag here however, since the slave may
+    // have been restarted with different flags since the container
+    // was created. It is also possible that isolator statistics are
+    // unavailable because we the container is in the process of being
+    // created or destroy. Hence we do not report a lack of network
+    // statistics as an error.
+  } else if (statistics.isError()) {
+    cerr << "Failed to get htb qdisc statistics on " << eth0
+         << " in namespace " << flags.pid.get() << endl;
   }
 
   // Drops due to the bandwidth limit should be reported at the leaf.
@@ -899,9 +907,11 @@ int PortMappingStatistics::execute()
         NET_ISOLATOR_BLOAT_REDUCTION,
         statistics.get(),
         &result);
-  } else {
-    cerr << "Failed to get the network statistics for "
-         << "the fq_codel qdisc on " << eth0 << endl;
+  } else if (statistics.isNone()) {
+    // See discussion on network isolator statistics above.
+  } else if (statistics.isError()) {
+    cerr << "Failed to get fq_codel qdisc statistics on " << eth0
+         << " in namespace " << flags.pid.get() << endl;
   }
 
   cout << stringify(JSON::Protobuf(result));
@@ -1081,26 +1091,18 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // Check the availability of a few Linux commands that we will use.
   // We use the blocking os::shell here because 'create' will only be
   // invoked during initialization.
-  Try<int> checkCommandTc = os::shell(NULL, "tc filter show");
+  Try<string> checkCommandTc = os::shell("tc filter show");
   if (checkCommandTc.isError()) {
     return Error("Check command 'tc' failed: " + checkCommandTc.error());
-  } else if (checkCommandTc.get() != 0) {
-    return Error(
-        "Check command 'tc' failed: non-zero exit code: " +
-        stringify(checkCommandTc.get()));
   }
 
-  Try<int> checkCommandIp = os::shell(NULL, "ip link show");
+  Try<string> checkCommandIp = os::shell("ip link show");
   if (checkCommandIp.isError()) {
     return Error("Check command 'ip' failed: " + checkCommandIp.error());
-  } else if (checkCommandIp.get() != 0) {
-    return Error(
-        "Check command 'ip' failed: non-zero exit code: " +
-        stringify(checkCommandIp.get()));
   }
 
   Try<Resources> resources = Resources::parse(
-      flags.resources.get(""),
+      flags.resources.getOrElse(""),
       flags.default_role);
 
   if (resources.isError()) {
@@ -1402,7 +1404,7 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 
     // TODO(cwang): Make sure DEFAULT_FLOWS is large enough so that
     // it's unlikely to run out of free flow IDs.
-    for(uint16_t i = CONTAINER_MIN_FLOWID; i < fq_codel::DEFAULT_FLOWS; i++) {
+    for (uint16_t i = CONTAINER_MIN_FLOWID; i < fq_codel::DEFAULT_FLOWS; i++) {
       freeFlowIds.insert(i);
     }
   }
@@ -1534,7 +1536,7 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 
   // We first create the bind mount directory if it does not exist.
   Try<Nothing> mkdir = os::mkdir(PORT_MAPPING_BIND_MOUNT_ROOT());
-  if(mkdir.isError()) {
+  if (mkdir.isError()) {
     return Error(
         "Failed to create the bind mount root directory at " +
         PORT_MAPPING_BIND_MOUNT_ROOT() + ": " + mkdir.error());
@@ -1564,8 +1566,7 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     // issues for the shell command 'mount --make-rslave' inside the
     // container. It's OK to use the blocking os::shell here because
     // 'create' will only be invoked during initialization.
-    Try<int> mount = os::shell(
-        NULL,
+    Try<string> mount = os::shell(
         "mount --bind %s %s",
         PORT_MAPPING_BIND_MOUNT_ROOT().c_str(),
         PORT_MAPPING_BIND_MOUNT_ROOT().c_str());
@@ -1574,17 +1575,12 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
       return Error(
           "Failed to self bind mount '" + PORT_MAPPING_BIND_MOUNT_ROOT() +
           "': " + mount.error());
-    } else if (mount.get() != 0) {
-      return Error(
-          "Failed to self bind mount '" + PORT_MAPPING_BIND_MOUNT_ROOT() +
-          "': non-zero exit code: " + stringify(mount.get()));
     }
   }
 
   // Mark the mount point PORT_MAPPING_BIND_MOUNT_ROOT() as
   // recursively shared.
-  Try<int> mountShared = os::shell(
-      NULL,
+  Try<string> mountShared = os::shell(
       "mount --make-rshared %s",
       PORT_MAPPING_BIND_MOUNT_ROOT().c_str());
 
@@ -1592,11 +1588,6 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     return Error(
         "Failed to mark '" + PORT_MAPPING_BIND_MOUNT_ROOT() +
         "' as recursively shared: " + mountShared.error());
-  } else if (mountShared.get() != 0) {
-    return Error(
-        "Failed to mark '" + PORT_MAPPING_BIND_MOUNT_ROOT() +
-        "' as recursively shared: " + "non-zero exit code: " +
-        stringify(mountShared.get()));
   }
 
   // Create the network namespace handle symlink directory if it does
@@ -1605,13 +1596,13 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // recover container IDs for orphan containers (i.e., not known by
   // the slave). This is introduced in 0.23.0.
   mkdir = os::mkdir(PORT_MAPPING_BIND_MOUNT_SYMLINK_ROOT());
-  if(mkdir.isError()) {
+  if (mkdir.isError()) {
     return Error(
         "Failed to create the bind mount root directory at " +
         PORT_MAPPING_BIND_MOUNT_SYMLINK_ROOT() + ": " + mkdir.error());
   }
 
-  return new Isolator(Owned<IsolatorProcess>(
+  return new MesosIsolator(Owned<MesosIsolatorProcess>(
       new PortMappingIsolatorProcess(
           flags,
           eth0.get(),
@@ -1628,14 +1619,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 }
 
 
-process::Future<Option<int>> PortMappingIsolatorProcess::namespaces()
-{
-  return CLONE_NEWNET;
-}
-
-
 Future<Nothing> PortMappingIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
   // Extract pids from virtual device names (veth). This tells us
@@ -1804,9 +1789,9 @@ Future<Nothing> PortMappingIsolatorProcess::recover(
   }
 
   // Now, actually recover the isolator from slave's state.
-  foreach (const ExecutorRunState& state, states) {
-    const ContainerID& containerId = state.id;
-    pid_t pid = state.pid;
+  foreach (const ContainerState& state, states) {
+    const ContainerID& containerId = state.container_id();
+    pid_t pid = state.pid();
 
     VLOG(1) << "Recovering network isolator for container "
             << containerId << " with pid " << pid;
@@ -2079,11 +2064,10 @@ PortMappingIsolatorProcess::_recover(pid_t pid)
 }
 
 
-Future<Option<CommandInfo>> PortMappingIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> PortMappingIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (unmanaged.contains(containerId)) {
@@ -2137,10 +2121,17 @@ Future<Option<CommandInfo>> PortMappingIsolatorProcess::prepare(
             << " for container " << containerId << " of executor "
             << executorInfo.executor_id();
 
-  CommandInfo command;
-  command.set_value(scripts(infos[containerId]));
+  ContainerPrepareInfo prepareInfo;
+  prepareInfo.add_commands()->set_value(scripts(infos[containerId]));
 
-  return command;
+  // NOTE: the port mapping isolator itself doesn't require mount
+  // namespace. However, if mount namespace is enabled because of
+  // other isolators, we need to set mount sharing accordingly for
+  // PORT_MAPPING_BIND_MOUNT_ROOT to avoid races described in
+  // MESOS-1558. So we turn on mount namespace here for consistency.
+  prepareInfo.set_namespaces(CLONE_NEWNET | CLONE_NEWNS);
+
+  return prepareInfo;
 }
 
 
@@ -2495,7 +2486,7 @@ Future<Nothing> PortMappingIsolatorProcess::isolate(
 }
 
 
-Future<Limitation> PortMappingIsolatorProcess::watch(
+Future<ContainerLimitation> PortMappingIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   if (unmanaged.contains(containerId)) {
@@ -2506,7 +2497,7 @@ Future<Limitation> PortMappingIsolatorProcess::watch(
 
   // Currently, we always return a pending future because limitation
   // is never reached.
-  return Future<Limitation>();
+  return Future<ContainerLimitation>();
 }
 
 
@@ -2727,7 +2718,7 @@ Future<ResourceStatistics> PortMappingIsolatorProcess::usage(
 
   Info* info = CHECK_NOTNULL(infos[containerId]);
 
-  if(info->pid.isNone()) {
+  if (info->pid.isNone()) {
     return result;
   }
 
@@ -2941,7 +2932,7 @@ Try<Nothing> PortMappingIsolatorProcess::_cleanup(
   // this function returns.
   Owned<Info> info(CHECK_NOTNULL(_info));
 
-  if(!info->pid.isSome()) {
+  if (!info->pid.isSome()) {
     LOG(WARNING) << "The container has not been isolated";
     return Nothing();
   }
@@ -3527,7 +3518,7 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   ostringstream script;
 
   script << "#!/bin/sh\n";
-  script << "set -x\n";
+  script << "set -xe\n";
 
   // Mark the mount point PORT_MAPPING_BIND_MOUNT_ROOT() as slave
   // mount so that changes in the container will not be propagated to

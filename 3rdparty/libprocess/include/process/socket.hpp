@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_SOCKET_HPP__
 #define __PROCESS_SOCKET_HPP__
 
@@ -14,37 +28,70 @@
 namespace process {
 namespace network {
 
-// An abstraction around a socket (file descriptor) that provides
-// reference counting such that the socket is only closed (and thus,
-// has the possiblity of being reused) after there are no more
-// references.
+/**
+ * An abstraction around a socket (file descriptor).
+ *
+ * Provides reference counting such that the socket is only closed
+ * (and thus, has the possiblity of being reused) after there are no
+ * more references.
+ */
 class Socket
 {
 public:
-  // Available kinds of implementations.
-  enum Kind {
+  /**
+   * Available kinds of implementations.
+   *
+   * @see process::network::PollSocketImpl
+   * @see process::network::LibeventSSLSocketImpl
+   */
+  enum Kind
+  {
     POLL,
 #ifdef USE_SSL_SOCKET
     SSL
 #endif
   };
 
-  // Returns an instance of a Socket using the specified kind of
-  // implementation and potentially wrapping the specified file
-  // descriptor.
+  /**
+   * Returns an instance of a `Socket` using the specified kind of
+   * implementation.
+   *
+   * @param kind Optional. The desired `Socket` implementation.
+   * @param s Optional.  The file descriptor to wrap with the `Socket`.
+   *
+   * @return An instance of a `Socket`.
+   */
   static Try<Socket> create(Kind kind = DEFAULT_KIND(), int s = -1);
 
-  // Returns the default kind of implementation of Socket.
+  /**
+   * Returns the default `Kind` of implementation of `Socket`.
+   *
+   * @see process::network::Socket::Kind
+   */
   static const Kind& DEFAULT_KIND();
 
-  // The kind representing the underlying implementation.
+  /**
+   * Returns the kind representing the underlying implementation
+   * of the `Socket` instance.
+   *
+   * @see process::network::Socket::Kind
+   */
   Kind kind() const { return impl->kind(); }
 
-  // Each socket is a reference counted, shared by default, concurrent
-  // object. However, since we want to support multiple
-  // implementations we use the Pimpl pattern (often called the
-  // compilation firewall) rather than forcing each Socket
-  // implementation to do this themselves.
+  /**
+   * Interface for a `Socket`.
+   *
+   * Each socket is:
+   *   - reference counted,
+   *   - shared by default,
+   *   - and a concurrent object.
+   *
+   * Multiple implementations are supported via the Pimpl pattern,
+   * rather than forcing each Socket implementation to do this themselves.
+   *
+   * @see process::network::Socket
+   * @see [Pimpl pattern](https://en.wikipedia.org/wiki/Opaque_pointer)
+   */
   class Impl : public std::enable_shared_from_this<Impl>
   {
   public:
@@ -58,17 +105,32 @@ public:
       }
     }
 
+    /**
+     * Returns the file descriptor wrapped by the `Socket`.
+     */
     int get() const
     {
       return s;
     }
 
-    // Interface functions implemented by this base class.
+    /**
+     * @copydoc network::address
+     */
     Try<Address> address() const;
+
+    /**
+     * @copydoc network::peer
+     */
     Try<Address> peer() const;
+
+    /**
+     * Assigns the specified address to the `Socket`.
+     *
+     * @return The assigned `Address` or an error if the bind system
+     *     call fails.
+     */
     Try<Address> bind(const Address& address);
 
-    // Socket::Impl interface.
     virtual Try<Nothing> listen(int backlog) = 0;
     virtual Future<Socket> accept() = 0;
     virtual Future<Nothing> connect(const Address& address) = 0;
@@ -76,52 +138,63 @@ public:
     virtual Future<size_t> send(const char* data, size_t size) = 0;
     virtual Future<size_t> sendfile(int fd, off_t offset, size_t size) = 0;
 
-    // An overload of 'recv', receives data based on the specified
-    // 'size' parameter:
-    //
-    //   Value of 'size'   |    Semantics
-    // --------------------|-----------------
-    //          0          |  Returns an empty string.
-    //          -1         |  Receives until EOF.
-    //          N          |  Returns a string of size N.
-    //        'None'       |  Returns a string of the available data.
-    //
-    // That is, if 'None' is specified than whenever data becomes
-    // available on the socket that much data will be returned.
-    //
+    /**
+     * An overload of `recv`, which receives data based on the specified
+     * 'size' parameter.
+     *
+     * @param size
+     *       Value  | Semantics
+     *     :-------:|-----------
+     *        0     | Returns an empty string.
+     *       -1     | Receives until EOF.
+     *        N     | Returns a string of size N.
+     *       'None' | Returns a string of the available data.
+     *     If 'None' is specified, whenever data becomes available on the
+     *     socket, that much data will be returned.
+     */
     // TODO(benh): Consider returning Owned<std::string> or
     // Shared<std::string>, the latter enabling reuse of a pool of
     // preallocated strings/buffers.
     virtual Future<std::string> recv(const Option<ssize_t>& size = None());
 
-    // An overload of 'send', sends all of the specified data unless
-    // sending fails in which case a failure is returned.
-    //
+    /**
+     * An overload of `send`, which sends all of the specified data.
+     *
+     * @param data The specified data to send.
+     *
+     * @return Nothing or an error in case the sending fails.
+     */
     // TODO(benh): Consider taking Shared<std::string>, the latter
     // enabling reuse of a pool of preallocated strings/buffers.
     virtual Future<Nothing> send(const std::string& data);
 
-    virtual void shutdown()
+    virtual Try<Nothing> shutdown()
     {
       if (::shutdown(s, SHUT_RD) < 0) {
-        PLOG(ERROR) << "Shutdown failed on fd=" << s;
+        return ErrnoError();
       }
+
+      return Nothing();
     }
 
     virtual Socket::Kind kind() const = 0;
 
-    // Construct a new Socket from the given impl. This is a proxy
-    // function, as Impls derived from this won't have access to the
-    // Socket::Socket(...) constructors.
-    //
-    // TODO(jmlvanre): These should be protected; however, gcc
-    // complains when using them from within a lambda of a derived
-    // class.
+    /**
+     * Construct a new `Socket` from the given impl.
+     *
+     * This is a proxy function, as `Impl`s derived from this won't have
+     * access to the Socket::Socket(...) constructors.
+     */
+    // TODO(jmlvanre): These should be protected; however, gcc complains
+    // when using them from within a lambda of a derived class.
     static Socket socket(std::shared_ptr<Impl>&& that)
     {
       return Socket(std::move(that));
     }
 
+    /**
+     * @copydoc process::network::Socket::Impl::socket
+     */
     static Socket socket(const std::shared_ptr<Impl>& that)
     {
       return Socket(that);
@@ -130,10 +203,14 @@ public:
   protected:
     explicit Impl(int _s) : s(_s) { CHECK(s >= 0); }
 
-    // Construct a Socket wrapper from this implementation.
+    /**
+     * Construct a `Socket` wrapper from this implementation.
+     */
     Socket socket() { return Socket(shared_from_this()); }
 
-    // Returns a std::shared_ptr<T> from this implementation.
+    /**
+     * Returns a `std::shared_ptr<T>` from this implementation.
+     */
     template <typename T>
     static std::shared_ptr<T> shared(T* t)
     {
@@ -146,12 +223,12 @@ public:
     int s;
   };
 
-  bool operator == (const Socket& that) const
+  bool operator==(const Socket& that) const
   {
     return impl == that.impl;
   }
 
-  operator int () const
+  operator int() const
   {
     return impl->get();
   }
@@ -216,9 +293,9 @@ public:
     return impl->send(data);
   }
 
-  void shutdown()
+  Try<Nothing> shutdown()
   {
-    impl->shutdown();
+    return impl->shutdown();
   }
 
 private:

@@ -21,8 +21,6 @@
 
 #include <string>
 
-#include <mesos/slave/isolator.hpp>
-
 #include <process/owned.hpp>
 
 #include <stout/bytes.hpp>
@@ -31,6 +29,8 @@
 
 #include "slave/flags.hpp"
 #include "slave/state.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 namespace mesos {
 namespace internal {
@@ -58,9 +58,10 @@ private:
 
 
 // This isolator monitors the disk usage for containers, and reports
-// Limitation when a container exceeds its disk quota. This leverages
-// the DiskUsageCollector to ensure that we don't induce too much CPU
-// usage and disk caching effects from running 'du' too often.
+// ContainerLimitation when a container exceeds its disk quota. This
+// leverages the DiskUsageCollector to ensure that we don't induce too
+// much CPU usage and disk caching effects from running 'du' too
+// often.
 //
 // NOTE: Currently all containers are processed in the same queue,
 // which means that when a container starts, it could take many disk
@@ -70,7 +71,7 @@ private:
 // TODO(jieyu): Consider handling each container independently, or
 // triggering an initial collection when the container starts, to
 // ensure that we have usage statistics without a large delay.
-class PosixDiskIsolatorProcess : public mesos::slave::IsolatorProcess
+class PosixDiskIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
@@ -78,21 +79,20 @@ public:
   virtual ~PosixDiskIsolatorProcess();
 
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(
@@ -124,7 +124,7 @@ private:
     // to collect disk usage for disk resources without DiskInfo.
     const std::string directory;
 
-    process::Promise<mesos::slave::Limitation> limitation;
+    process::Promise<mesos::slave::ContainerLimitation> limitation;
 
     // The keys of the hashmaps contain the executor working directory
     // above, and optionally paths of volumes used by the container.

@@ -28,14 +28,14 @@ using std::list;
 using std::set;
 using std::string;
 
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
+using mesos::slave::Isolator;
+
 namespace mesos {
 namespace internal {
 namespace slave {
-
-using mesos::slave::ExecutorRunState;
-using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
 
 SharedFilesystemIsolatorProcess::SharedFilesystemIsolatorProcess(
     const Flags& _flags)
@@ -57,21 +57,15 @@ Try<Isolator*> SharedFilesystemIsolatorProcess::create(const Flags& flags)
     return Error("SharedFilesystemIsolator requires root privileges");
   }
 
-  process::Owned<IsolatorProcess> process(
+  process::Owned<MesosIsolatorProcess> process(
       new SharedFilesystemIsolatorProcess(flags));
 
-  return new Isolator(process);
-}
-
-
-process::Future<Option<int>> SharedFilesystemIsolatorProcess::namespaces()
-{
-  return CLONE_NEWNS;
+  return new MesosIsolator(process);
 }
 
 
 Future<Nothing> SharedFilesystemIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
   // There is nothing to recover because we do not keep any state and
@@ -80,11 +74,10 @@ Future<Nothing> SharedFilesystemIsolatorProcess::recover(
 }
 
 
-Future<Option<CommandInfo>> SharedFilesystemIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> SharedFilesystemIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (executorInfo.has_container() &&
@@ -108,7 +101,8 @@ Future<Option<CommandInfo>> SharedFilesystemIsolatorProcess::prepare(
   set<string> containerPaths;
   containerPaths.insert(directory);
 
-  list<string> commands;
+  ContainerPrepareInfo prepareInfo;
+  prepareInfo.set_namespaces(CLONE_NEWNS);
 
   foreach (const Volume& volume, executorInfo.container().volumes()) {
     // Because the filesystem is shared we require the container path
@@ -206,23 +200,18 @@ Future<Option<CommandInfo>> SharedFilesystemIsolatorProcess::prepare(
 
       if (!os::exists(hostPath)) {
         return Failure("Volume with container path '" +
-                      volume.container_path() +
-                      "' must have host path '" +
-                      hostPath +
-                      "' present on host for shared filesystem isolator");
+                       volume.container_path() +
+                       "' must have host path '" +
+                       hostPath +
+                       "' present on host for shared filesystem isolator");
       }
     }
 
-    commands.push_back("mount -n --bind " +
-                       hostPath +
-                       " " +
-                       volume.container_path());
+    prepareInfo.add_commands()->set_value(
+        "mount -n --bind " + hostPath + " " + volume.container_path());
   }
 
-  CommandInfo command;
-  command.set_value(strings::join(" && ", commands));
-
-  return command;
+  return prepareInfo;
 }
 
 
@@ -236,12 +225,12 @@ Future<Nothing> SharedFilesystemIsolatorProcess::isolate(
 }
 
 
-Future<Limitation> SharedFilesystemIsolatorProcess::watch(
+Future<ContainerLimitation> SharedFilesystemIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   // No-op, for now.
 
-  return Future<Limitation>();
+  return Future<ContainerLimitation>();
 }
 
 

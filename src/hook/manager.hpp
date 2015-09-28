@@ -45,17 +45,35 @@ public:
       const FrameworkInfo& frameworkInfo,
       const SlaveInfo& slaveInfo);
 
+  static void masterSlaveLostHook(const SlaveInfo& slaveInfo);
+
   static Labels slaveRunTaskLabelDecorator(
       const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
       const FrameworkInfo& frameworkInfo,
       const SlaveInfo& slaveInfo);
 
   static Environment slaveExecutorEnvironmentDecorator(
       ExecutorInfo executorInfo);
 
+  static void slavePreLaunchDockerHook(
+      const ContainerInfo& containerInfo,
+      const CommandInfo& commandInfo,
+      const Option<TaskInfo>& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& name,
+      const std::string& sandboxDirectory,
+      const std::string& mappedDirectory,
+      const Option<Resources>& resources,
+      const Option<std::map<std::string, std::string>>& env);
+
   static void slaveRemoveExecutorHook(
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo);
+
+  static TaskStatus slaveTaskStatusDecorator(
+      const FrameworkID& frameworkId,
+      TaskStatus status);
 };
 
 } // namespace internal {

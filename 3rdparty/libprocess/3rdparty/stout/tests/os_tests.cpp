@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <stdint.h>
 
 #ifndef __linux__
@@ -537,10 +551,10 @@ void dosetsid(void)
 TEST_F(OsTest, Killtree)
 {
   Try<ProcessTree> tree =
-    Fork(dosetsid,                         // Child.
+    Fork(&dosetsid,                        // Child.
          Fork(None(),                      // Grandchild.
               Fork(None(),                 // Great-grandchild.
-                   Fork(dosetsid,          // Great-great-granchild.
+                   Fork(&dosetsid,         // Great-great-granchild.
                         Exec("sleep 10")),
                    Exec("sleep 10")),
               Exec("exit 0")),
@@ -660,7 +674,7 @@ TEST_F(OsTest, Killtree)
 TEST_F(OsTest, KilltreeNoRoot)
 {
   Try<ProcessTree> tree =
-    Fork(dosetsid,        // Child.
+    Fork(&dosetsid,       // Child.
          Fork(None(),     // Grandchild.
               Fork(None(),
                    Exec("sleep 100")),
@@ -868,21 +882,21 @@ TEST_F(OsTest, ProcessExists)
 
 TEST_F(OsTest, User)
 {
-  std::ostringstream user_;
-  EXPECT_SOME_EQ(0, os::shell(&user_ , "id -un"));
+  Try<string> user_ = os::shell("id -un");
+  EXPECT_SOME(user_);
 
   Result<string> user = os::user();
-  ASSERT_SOME_EQ(strings::trim(user_.str()), user);
+  ASSERT_SOME_EQ(strings::trim(user_.get()), user);
 
-  std::ostringstream uid_;
-  EXPECT_SOME_EQ(0, os::shell(&uid_, "id -u"));
-  Try<uid_t> uid = numify<uid_t>(strings::trim(uid_.str()));
+  Try<string> uid_ = os::shell("id -u");
+  EXPECT_SOME(uid_);
+  Try<uid_t> uid = numify<uid_t>(strings::trim(uid_.get()));
   ASSERT_SOME(uid);
   EXPECT_SOME_EQ(uid.get(), os::getuid(user.get()));
 
-  std::ostringstream gid_;
-  EXPECT_SOME_EQ(0, os::shell(&gid_, "id -g"));
-  Try<gid_t> gid = numify<gid_t>(strings::trim(gid_.str()));
+  Try<string> gid_ = os::shell("id -g");
+  EXPECT_SOME(gid_);
+  Try<gid_t> gid = numify<gid_t>(strings::trim(gid_.get()));
   ASSERT_SOME(gid);
   EXPECT_SOME_EQ(gid.get(), os::getgid(user.get()));
 
@@ -934,6 +948,33 @@ TEST_F(OsTest, Libraries)
 }
 
 
+TEST_F(OsTest, Shell)
+{
+  Try<string> result = os::shell("echo %s", "hello world");
+  EXPECT_SOME_EQ("hello world\n", result);
+
+  result = os::shell("foobar");
+  EXPECT_ERROR(result);
+
+  // The `|| true`` necessary so that os::shell() sees a success
+  // exit code and returns stdout (which we have piped stderr to).
+  result = os::shell("ls /tmp/foobar889076 2>&1 || true");
+  ASSERT_SOME(result);
+  EXPECT_TRUE(strings::contains(result.get(), "No such file or directory"));
+
+  // Testing a more ambitious command that mutates the filesystem.
+  const string path = "/tmp/os_tests.txt";
+  result = os::shell("touch %s", path.c_str());
+  EXPECT_SOME_EQ("", result);
+  EXPECT_TRUE(os::exists(path));
+
+  // Let's clean up, and ensure this worked too.
+  result = os::shell("rm %s", path.c_str());
+  EXPECT_SOME_EQ("", result);
+  EXPECT_FALSE(os::exists("/tmp/os_tests.txt"));
+}
+
+
 TEST_F(OsTest, Mknod)
 {
   // mknod requires root permission.
@@ -961,4 +1002,39 @@ TEST_F(OsTest, Mknod)
   EXPECT_SOME(os::mknod(another, mode.get(), rdev.get()));
 
   EXPECT_SOME(os::rm(another));
+}
+
+
+TEST_F(OsTest, Realpath)
+{
+  // Create a file.
+  const Try<std::string> _testFile = os::mktemp();
+  ASSERT_SOME(_testFile);
+  ASSERT_SOME(os::touch(_testFile.get()));
+  const std::string testFile = _testFile.get();
+
+  // Create a symlink pointing to a file.
+  const std::string testLink = UUID::random().toString();
+  ASSERT_SOME(fs::symlink(testFile, testLink));
+
+  // Validate the symlink.
+  const Try<ino_t> fileInode = os::stat::inode(testFile);
+  ASSERT_SOME(fileInode);
+  const Try<ino_t> linkInode = os::stat::inode(testLink);
+  ASSERT_SOME(linkInode);
+  ASSERT_EQ(fileInode.get(), linkInode.get());
+
+  // Verify that the symlink resolves correctly.
+  Result<std::string> resolved = os::realpath(testLink);
+  ASSERT_SOME(resolved);
+  EXPECT_TRUE(strings::contains(resolved.get(), testFile));
+
+  // Verify that the file itself resolves correctly.
+  resolved = os::realpath(testFile);
+  ASSERT_SOME(resolved);
+  EXPECT_TRUE(strings::contains(resolved.get(), testFile));
+
+  // Remove the file and the symlink.
+  os::rm(testFile);
+  os::rm(testLink);
 }

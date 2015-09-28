@@ -19,6 +19,8 @@
 #include <memory>
 #include <string>
 
+#include <mesos/authorizer/authorizer.hpp>
+
 #include <stout/check.hpp>
 #include <stout/foreach.hpp>
 #include <stout/json.hpp>
@@ -27,8 +29,6 @@
 #include <stout/result.hpp>
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
-
-#include "authorizer/authorizer.hpp"
 
 #ifdef __linux__
 #include "linux/cgroups.hpp"
@@ -462,7 +462,7 @@ MockSlave::MockSlave(const slave::Flags& flags,
   // Set up default behaviors, calling the original methods.
   EXPECT_CALL(*this, runTask(_, _, _, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_runTask));
-  EXPECT_CALL(*this, _runTask(_, _, _, _))
+  EXPECT_CALL(*this, _runTask(_, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked__runTask));
   EXPECT_CALL(*this, killTask(_, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_killTask));
@@ -485,20 +485,19 @@ void MockSlave::unmocked_runTask(
     const UPID& from,
     const FrameworkInfo& frameworkInfo,
     const FrameworkID& frameworkId,
-    const std::string& pid,
+    const UPID& pid,
     TaskInfo task)
 {
-  slave::Slave::runTask(from, frameworkInfo, frameworkId, pid, task);
+  slave::Slave::runTask(from, frameworkInfo, frameworkInfo.id(), pid, task);
 }
 
 
 void MockSlave::unmocked__runTask(
       const Future<bool>& future,
       const FrameworkInfo& frameworkInfo,
-      const std::string& pid,
       const TaskInfo& task)
 {
-  slave::Slave::_runTask(future, frameworkInfo, pid, task);
+  slave::Slave::_runTask(future, frameworkInfo, task);
 }
 
 
@@ -731,6 +730,29 @@ void ContainerizerTest<slave::MesosContainerizer>::SetUp()
               ->current_test_info()
               ->test_case_name() << ".*).\n"
           << "-------------------------------------------------------------";
+      } else {
+        // If the subsystem is already mounted in the hierarchy make
+        // sure that we don't have any existing cgroups that have
+        // persisted that match our TEST_CGROUPS_ROOT (because
+        // otherwise our tests will fail when we try and clean them up
+        // later).
+        Try<std::vector<string>> cgroups = cgroups::get(hierarchy);
+        ASSERT_SOME(cgroups);
+
+        foreach (const string& cgroup, cgroups.get()) {
+          // Remove any cgroups that start with TEST_CGROUPS_ROOT.
+          if (strings::startsWith(cgroup, TEST_CGROUPS_ROOT)) {
+            AWAIT_READY(cgroups::destroy(hierarchy, cgroup))
+              << "-----------------------------------------------------------\n"
+              << "We're very sorry but we can't seem to destroy existing\n"
+              << "cgroups that we likely created as part of an earlier\n"
+              << "invocation of the tests. Please manually destroy the cgroup\n"
+              << "at '" << path::join(hierarchy, cgroup) << "' by first\n"
+              << "manually killing all the processes found in the file at '"
+              << path::join(hierarchy, cgroup, "tasks") << "'\n"
+              << "-----------------------------------------------------------";
+          }
+        }
       }
     }
   }
@@ -749,7 +771,7 @@ void ContainerizerTest<slave::MesosContainerizer>::TearDown()
       string hierarchy = path::join(baseHierarchy, subsystem);
 
       Try<std::vector<string>> cgroups = cgroups::get(hierarchy);
-      CHECK_SOME(cgroups);
+      ASSERT_SOME(cgroups);
 
       foreach (const string& cgroup, cgroups.get()) {
         // Remove any cgroups that start with TEST_CGROUPS_ROOT.

@@ -21,12 +21,11 @@
 
 #include <glog/logging.h>
 
+#include <mesos/attributes.hpp>
 #include <mesos/values.hpp>
 
 #include <stout/foreach.hpp>
 #include <stout/strings.hpp>
-
-#include "common/attributes.hpp"
 
 using std::ostream;
 using std::string;
@@ -35,8 +34,7 @@ using std::vector;
 
 namespace mesos {
 
-
-std::ostream& operator << (std::ostream& stream, const Attribute& attribute)
+std::ostream& operator<<(std::ostream& stream, const Attribute& attribute)
 {
   stream << attribute.name() << "=";
   switch (attribute.type()) {
@@ -53,10 +51,7 @@ std::ostream& operator << (std::ostream& stream, const Attribute& attribute)
 }
 
 
-namespace internal {
-
-
-bool Attributes::operator == (const Attributes& that) const
+bool Attributes::operator==(const Attributes& that) const
 {
   if (size() != that.size()) {
     return false;
@@ -106,16 +101,16 @@ const Option<Attribute> Attributes::get(const Attribute& thatAttribute) const
 }
 
 
-Attribute Attributes::parse(const std::string& name, const std::string& text)
+Attribute Attributes::parse(const string& name, const string& text)
 {
   Attribute attribute;
-  Try<Value> result = values::parse(text);
+  Try<Value> result = internal::values::parse(text);
 
   if (result.isError()) {
     LOG(FATAL) << "Failed to parse attribute " << name
                << " text " << text
                << " error " << result.error();
-  } else{
+  } else {
     Value value = result.get();
     attribute.set_name(name);
 
@@ -147,9 +142,9 @@ Attributes Attributes::parse(const string& s)
   vector<string> tokens = strings::tokenize(s, ";\n");
 
   for (size_t i = 0; i < tokens.size(); i++) {
-    const vector<string>& pairs = strings::tokenize(tokens[i], ":");
-    if (pairs.size() != 2) {
-      LOG(FATAL) << "Bad value for attributes, missing ':' within " << pairs[0];
+    const vector<string>& pairs = strings::split(tokens[i], ":", 2);
+    if (pairs.size() != 2 || pairs[0].empty() || pairs[1].empty()) {
+      LOG(FATAL) << "Invalid attribute key:value pair '" << tokens[i] << "'";
     }
 
     attributes.add(parse(pairs[0], pairs[1]));
@@ -185,7 +180,7 @@ bool Attributes::isValid(const Attribute& attribute)
 
 template <>
 Value::Scalar Attributes::get(
-    const std::string& name,
+    const string& name,
     const Value::Scalar& scalar) const
 {
   foreach (const Attribute& attribute, attributes) {
@@ -201,7 +196,7 @@ Value::Scalar Attributes::get(
 
 template <>
 Value::Ranges Attributes::get(
-    const std::string& name,
+    const string& name,
     const Value::Ranges& ranges) const
 {
   foreach (const Attribute& attribute, attributes) {
@@ -217,7 +212,7 @@ Value::Ranges Attributes::get(
 
 template <>
 Value::Text Attributes::get(
-    const std::string& name,
+    const string& name,
     const Value::Text& text) const
 {
   foreach (const Attribute& attribute, attributes) {
@@ -230,6 +225,4 @@ Value::Text Attributes::get(
   return text;
 }
 
-
-} // namespace internal {
 } // namespace mesos {

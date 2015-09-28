@@ -27,8 +27,6 @@
 #include <string>
 #include <vector>
 
-#include <mesos/slave/isolator.hpp>
-
 #include <process/owned.hpp>
 #include <process/subprocess.hpp>
 
@@ -48,6 +46,8 @@
 #include "linux/routing/filter/ip.hpp"
 
 #include "slave/flags.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 namespace mesos {
 namespace internal {
@@ -145,31 +145,28 @@ std::vector<routing::filter::ip::PortRange> getPortRanges(
 // isolator is useful when the operator wants to reuse the host IP for
 // all containers running on the host (e.g., there are insufficient
 // IPs).
-class PortMappingIsolatorProcess : public mesos::slave::IsolatorProcess
+class PortMappingIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
 
   virtual ~PortMappingIsolatorProcess() {}
 
-  virtual process::Future<Option<int>> namespaces();
-
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(

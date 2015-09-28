@@ -61,7 +61,7 @@ namespace slave {
 Try<Resources> Containerizer::resources(const Flags& flags)
 {
   Try<Resources> parsed = Resources::parse(
-      flags.resources.get(""), flags.default_role);
+      flags.resources.getOrElse(""), flags.default_role);
 
   if (parsed.isError()) {
     return Error(parsed.error());
@@ -75,7 +75,7 @@ Try<Resources> Containerizer::resources(const Flags& flags)
   //  (2) no cpus specified.
   // We only auto-detect cpus in case (2).
   // The same logic applies for the other resources!
-  if (!strings::contains(flags.resources.get(""), "cpus")) {
+  if (!strings::contains(flags.resources.getOrElse(""), "cpus")) {
     // No CPU specified so probe OS or resort to DEFAULT_CPUS.
     double cpus;
     Try<long> cpus_ = os::cpus();
@@ -95,7 +95,7 @@ Try<Resources> Containerizer::resources(const Flags& flags)
   }
 
   // Memory resource.
-  if (!strings::contains(flags.resources.get(""), "mem")) {
+  if (!strings::contains(flags.resources.getOrElse(""), "mem")) {
     // No memory specified so probe OS or resort to DEFAULT_MEM.
     Bytes mem;
     Try<os::Memory> mem_ = os::memory();
@@ -120,7 +120,7 @@ Try<Resources> Containerizer::resources(const Flags& flags)
   }
 
   // Disk resource.
-  if (!strings::contains(flags.resources.get(""), "disk")) {
+  if (!strings::contains(flags.resources.getOrElse(""), "disk")) {
     // No disk specified so probe OS or resort to DEFAULT_DISK.
     Bytes disk;
 
@@ -148,7 +148,7 @@ Try<Resources> Containerizer::resources(const Flags& flags)
   }
 
   // Network resource.
-  if (!strings::contains(flags.resources.get(""), "ports")) {
+  if (!strings::contains(flags.resources.getOrElse(""), "ports")) {
     // No ports specified so resort to DEFAULT_PORTS.
     resources += Resources::parse(
         "ports",
@@ -240,12 +240,12 @@ map<string, string> executorEnvironment(
     const SlaveID& slaveId,
     const PID<Slave>& slavePid,
     bool checkpoint,
-    const Flags& flags)
+    const Flags& flags,
+    bool includeOsEnvironment)
 {
-  map<string, string> environment = os::environment();
+  map<string, string> environment;
 
   if (flags.executor_environment_variables.isSome()) {
-    environment.clear();
     foreachpair (const string& key,
                  const JSON::Value& value,
                  flags.executor_environment_variables.get().values) {
@@ -253,6 +253,8 @@ map<string, string> executorEnvironment(
       CHECK(value.is<JSON::String>());
       environment[key] = value.as<JSON::String>().value;
     }
+  } else if (includeOsEnvironment) {
+    environment = os::environment();
   }
 
   // Set LIBPROCESS_PORT so that we bind to a random free port (since

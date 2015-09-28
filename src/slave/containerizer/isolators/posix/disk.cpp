@@ -44,6 +44,8 @@
 #include <stout/os/exists.hpp>
 #include <stout/os/killtree.hpp>
 
+#include "common/protobuf_utils.hpp"
+
 #include "slave/containerizer/isolators/posix/disk.hpp"
 
 using namespace process;
@@ -53,21 +55,21 @@ using std::list;
 using std::string;
 using std::vector;
 
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
+using mesos::slave::Isolator;
+
 namespace mesos {
 namespace internal {
 namespace slave {
-
-using mesos::slave::ExecutorRunState;
-using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
 
 Try<Isolator*> PosixDiskIsolatorProcess::create(const Flags& flags)
 {
   // TODO(jieyu): Check the availability of command 'du'.
 
-  return new Isolator(
-      process::Owned<IsolatorProcess>(new PosixDiskIsolatorProcess(flags)));
+  return new MesosIsolator(process::Owned<MesosIsolatorProcess>(
+        new PosixDiskIsolatorProcess(flags)));
 }
 
 
@@ -85,27 +87,26 @@ PosixDiskIsolatorProcess::~PosixDiskIsolatorProcess() {}
 
 
 Future<Nothing> PosixDiskIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
-  foreach (const ExecutorRunState& state, states) {
+  foreach (const ContainerState& state, states) {
     // Since we checkpoint the executor after we create its working
     // directory, the working directory should definitely exist.
-    CHECK(os::exists(state.directory))
-      << "Executor work directory " << state.directory << " doesn't exist";
+    CHECK(os::exists(state.directory()))
+      << "Executor work directory " << state.directory() << " doesn't exist";
 
-    infos.put(state.id, Owned<Info>(new Info(state.directory)));
+    infos.put(state.container_id(), Owned<Info>(new Info(state.directory())));
   }
 
   return Nothing();
 }
 
 
-Future<Option<CommandInfo>> PosixDiskIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> PosixDiskIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (infos.contains(containerId)) {
@@ -130,7 +131,7 @@ Future<Nothing> PosixDiskIsolatorProcess::isolate(
 }
 
 
-Future<Limitation> PosixDiskIsolatorProcess::watch(
+Future<ContainerLimitation> PosixDiskIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   if (!infos.contains(containerId)) {
@@ -246,8 +247,8 @@ void PosixDiskIsolatorProcess::_collect(
       CHECK_SOME(quota);
 
       if (future.get() > quota.get()) {
-        info->limitation.set(Limitation(
-            info->paths[path].quota,
+        info->limitation.set(protobuf::slave::createContainerLimitation(
+            Resources(info->paths[path].quota),
             "Disk usage (" + stringify(future.get()) +
             ") exceeds quota (" + stringify(quota.get()) + ")"));
       }

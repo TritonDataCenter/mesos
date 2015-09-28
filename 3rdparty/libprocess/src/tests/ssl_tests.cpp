@@ -1,9 +1,18 @@
-#include <stdio.h>
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
 
-#include <openssl/rsa.h>
-#include <openssl/bio.h>
-#include <openssl/x509.h>
-#include <openssl/x509v3.h>
+#include <stdio.h>
 
 #include <process/future.hpp>
 #include <process/gtest.hpp>
@@ -11,11 +20,13 @@
 #include <process/socket.hpp>
 #include <process/subprocess.hpp>
 
+#include <process/ssl/gtest.hpp>
+#include <process/ssl/utilities.hpp>
+
 #include <stout/gtest.hpp>
 #include <stout/os.hpp>
 
 #include "openssl.hpp"
-#include "openssl_util.hpp"
 
 using std::map;
 using std::string;
@@ -23,18 +34,6 @@ using std::vector;
 
 // We only run these tests if we have configured with '--enable-ssl'.
 #ifdef USE_SSL_SOCKET
-
-namespace process {
-namespace network {
-namespace openssl {
-
-// Forward declare the `reinitialize()` function since we want to
-// programatically change SSL flags during tests.
-void reinitialize();
-
-} // namespace openssl {
-} // namespace network {
-} // namespace process {
 
 using namespace process;
 using namespace process::network;
@@ -84,276 +83,6 @@ Future<Nothing> await_subprocess(
 }
 
 
-/**
- * A Test fixture that sets up SSL keys and certificates.
- *
- * This class sets up a private key and certificate pair at
- * SSLTest::key_path and SSLTest::certificate_path.
- * It also sets up an independent 'scrap' pair that can be used to
- * test an invalid certificate authority chain. These can be found at
- * SSLTest::scrap_key_path and SSLTest::scrap_certificate_path.
- *
- * There are some helper functions like SSLTest::setup_server and
- * SSLTest::launch_client that factor out common behavior used in
- * tests.
- */
-class SSLTest : public ::testing::Test
-{
-protected:
-  SSLTest() : data("Hello World!") {}
-
-  /**
-   * @return The path to the authorized private key.
-   */
-  static const Path& key_path()
-  {
-    static Path path(path::join(os::getcwd(), "key.pem"));
-    return path;
-  }
-
-  /**
-   * @return The path to the authorized certificate.
-   */
-  static const Path& certificate_path()
-  {
-    static Path path(path::join(os::getcwd(), "cert.pem"));
-    return path;
-  }
-
-  /**
-   * @return The path to the unauthorized private key.
-   */
-  static const Path& scrap_key_path()
-  {
-    static Path path(path::join(os::getcwd(), "scrap_key.pem"));
-    return path;
-  }
-
-  /**
-   * @return The path to the unauthorized certificate.
-   */
-  static const Path& scrap_certificate_path()
-  {
-    static Path path(path::join(os::getcwd(), "scrap_cert.pem"));
-    return path;
-  }
-
-  static void SetUpTestCase()
-  {
-    // We store the allocated objects in these results so that we can
-    // have a consolidated 'cleanup()' function. This makes all the
-    // 'EXIT()' calls more readable and less error prone.
-    Result<EVP_PKEY*> private_key = None();
-    Result<X509*> certificate = None();
-    Result<EVP_PKEY*> scrap_key = None();
-    Result<X509*> scrap_certificate = None();
-
-    auto cleanup = [&private_key, &certificate, &scrap_key, &scrap_certificate](
-        bool failure = true) {
-      if (private_key.isSome()) { EVP_PKEY_free(private_key.get()); }
-      if (certificate.isSome()) { X509_free(certificate.get()); }
-      if (scrap_key.isSome()) { EVP_PKEY_free(scrap_key.get()); }
-      if (scrap_certificate.isSome()) { X509_free(scrap_certificate.get()); }
-
-      // If we are under a failure condition, clean up any files we
-      // already generated. The expected behavior is that they will be
-      // cleaned up in 'TearDownTestCase()'; however, we call ABORT
-      // during 'SetUpTestCase()' failures.
-      if (failure) {
-        os::rm(key_path().value);
-        os::rm(certificate_path().value);
-        os::rm(scrap_key_path().value);
-        os::rm(scrap_certificate_path().value);
-      }
-    };
-
-    // Generate the authority key.
-    private_key = openssl::generate_private_rsa_key();
-    if (private_key.isError()) {
-      ABORT("Could not generate private key: " + private_key.error());
-    }
-
-    // Generate an authorized certificate.
-    certificate = openssl::generate_x509(private_key.get(), private_key.get());
-
-    if (certificate.isError()) {
-      cleanup();
-      ABORT("Could not generate certificate: " + certificate.error());
-    }
-
-    // Write the authority key to disk.
-    Try<Nothing> key_write =
-      openssl::write_key_file(private_key.get(), key_path());
-
-    if (key_write.isError()) {
-      cleanup();
-      ABORT("Could not write private key to disk: " + key_write.error());
-    }
-
-    // Write the authorized certificate to disk.
-    Try<Nothing> certificate_write =
-      openssl::write_certificate_file(certificate.get(), certificate_path());
-
-    if (certificate_write.isError()) {
-      cleanup();
-      ABORT("Could not write certificate to disk: " +
-            certificate_write.error());
-    }
-
-    // Generate a scrap key.
-    scrap_key = openssl::generate_private_rsa_key();
-    if (scrap_key.isError()) {
-      cleanup();
-      ABORT("Could not generate a scrap private key: " + scrap_key.error());
-    }
-
-    // Write the scrap key to disk.
-    key_write = openssl::write_key_file(scrap_key.get(), scrap_key_path());
-
-    if (key_write.isError()) {
-      cleanup();
-      ABORT("Could not write scrap key to disk: " + key_write.error());
-    }
-
-    // Generate a scrap certificate.
-    scrap_certificate =
-      openssl::generate_x509(scrap_key.get(), scrap_key.get());
-
-    if (scrap_certificate.isError()) {
-      cleanup();
-      ABORT("Could not generate a scrap certificate: " +
-            scrap_certificate.error());
-    }
-
-    // Write the scrap certificate to disk.
-    certificate_write = openssl::write_certificate_file(
-        scrap_certificate.get(),
-        scrap_certificate_path());
-
-    if (certificate_write.isError()) {
-      cleanup();
-      ABORT("Could not write scrap certificate to disk: " +
-            certificate_write.error());
-    }
-
-    // Since we successfully set up all our state, we call cleanup
-    // with failure set to 'false'.
-    cleanup(false);
-  }
-
-  static void TearDownTestCase()
-  {
-    // Clean up all the pem files we generated.
-    os::rm(key_path().value);
-    os::rm(certificate_path().value);
-    os::rm(scrap_key_path().value);
-    os::rm(scrap_certificate_path().value);
-  }
-
-  virtual void SetUp()
-  {
-    // This unsets all the SSL environment variables. Necessary for
-    // ensuring a clean starting slate between tests.
-    os::unsetenv("SSL_ENABLED");
-    os::unsetenv("SSL_SUPPORT_DOWNGRADE");
-    os::unsetenv("SSL_CERT_FILE");
-    os::unsetenv("SSL_KEY_FILE");
-    os::unsetenv("SSL_VERIFY_CERT");
-    os::unsetenv("SSL_REQUIRE_CERT");
-    os::unsetenv("SSL_VERIFY_DEPTH");
-    os::unsetenv("SSL_CA_DIR");
-    os::unsetenv("SSL_CA_FILE");
-    os::unsetenv("SSL_CIPHERS");
-    os::unsetenv("SSL_ENABLE_SSL_V2");
-    os::unsetenv("SSL_ENABLE_SSL_V3");
-    os::unsetenv("SSL_ENABLE_TLS_V1_0");
-    os::unsetenv("SSL_ENABLE_TLS_V1_1");
-    os::unsetenv("SSL_ENABLE_TLS_V1_2");
-  }
-
-  /**
-   * Initializes a listening server.
-   *
-   * @param environment The SSL environment variables to launch the
-   *     server socket with.
-   *
-   * @return Socket if successful otherwise an Error.
-   */
-  Try<Socket> setup_server(const map<string, string>& environment)
-  {
-    foreachpair (const string& name, const string& value, environment) {
-      os::setenv(name, value);
-    }
-    openssl::reinitialize();
-
-    const Try<Socket> create = Socket::create(Socket::SSL);
-    if (create.isError()) {
-      return Error(create.error());
-    }
-
-    Socket server = create.get();
-
-    const Try<Nothing> listen = server.listen(BACKLOG);
-    if (listen.isError()) {
-      return Error(listen.error());
-    }
-
-    return server;
-  }
-
-  /**
-   * Launches a test SSL client as a subprocess connecting to the
-   * server.
-   *
-   * The subprocess calls the 'ssl-client' binary with the provided
-   * environment.
-   *
-   * @param environment The SSL environment variables to launch the
-   *     SSL client subprocess with.
-   * @param use_ssl_socket Whether the SSL client will try to connect
-   *     using an SSL socket or a POLL socket.
-   *
-   * @return Subprocess if successful otherwise an Error.
-   */
-  Try<Subprocess> launch_client(
-      const map<string, string>& environment,
-      const Socket& server,
-      bool use_ssl_socket)
-  {
-    const Try<Address> address = server.address();
-    if (address.isError()) {
-      return Error(address.error());
-    }
-
-    // Set up arguments to be passed to the 'client-ssl' binary.
-    const vector<string> argv = {
-      "ssl-client",
-      "--use_ssl=" + stringify(use_ssl_socket),
-      "--server=127.0.0.1",
-      "--port=" + stringify(address.get().port),
-      "--data=" + data};
-
-    Result<string> path = os::realpath(BUILD_DIR);
-    if (!path.isSome()) {
-      return Error("Could not establish build directory path");
-    }
-
-    return subprocess(
-        path::join(path.get(), "ssl-client"),
-        argv,
-        Subprocess::PIPE(),
-        Subprocess::PIPE(),
-        Subprocess::FD(STDERR_FILENO),
-        None(),
-        environment);
-  }
-
-  static constexpr size_t BACKLOG = 5;
-
-  const string data;
-};
-
-
 // Ensure that we can't create an SSL socket when SSL is not enabled.
 TEST(SSL, Disabled)
 {
@@ -384,6 +113,10 @@ TEST_F(SSLTest, BasicSameProcess)
 
   Socket server = server_create.get();
   Socket client = client_create.get();
+
+  // We need to explicitly bind to INADDR_LOOPBACK so the certificate
+  // we create in this test fixture can be verified.
+  ASSERT_SOME(server.bind(Address(net::IP(INADDR_LOOPBACK), 0)));
 
   const Try<Nothing> listen = server.listen(BACKLOG);
   ASSERT_SOME(listen);
@@ -625,25 +358,24 @@ TEST_F(SSLTest, RequireCertificate)
 }
 
 
+// The SSL protocols that we support through configuration flags.
+static const vector<string> protocols = {
+  // OpenSSL can be compiled with SSLV3 disabled completely, so we
+  // conditionally test for this protocol.
+#ifndef OPENSSL_NO_SSL3
+  "SSL_ENABLE_SSL_V3",
+#endif
+  "SSL_ENABLE_TLS_V1_0",
+  "SSL_ENABLE_TLS_V1_1",
+  "SSL_ENABLE_TLS_V1_2"
+};
+
+
 // Test all the combinations of protocols. Ensure that they can only
 // communicate if the opposing end allows the given protocol, and not
 // otherwise.
 TEST_F(SSLTest, ProtocolMismatch)
 {
-  const vector<string> protocols = {
-    // Openssl can be compiled with SSLV2 and/or SSLV3 disabled
-    // completely, so we conditionally test these protocol.
-#ifndef OPENSSL_NO_SSL2
-    "SSL_ENABLE_SSL_V2",
-#endif
-#ifndef OPENSSL_NO_SSL3
-    "SSL_ENABLE_SSL_V3",
-#endif
-    "SSL_ENABLE_TLS_V1_0",
-    "SSL_ENABLE_TLS_V1_1",
-    "SSL_ENABLE_TLS_V1_2"
-  };
-
   // For each server protocol.
   foreach (const string& server_protocol, protocols) {
     // For each client protocol.
@@ -765,20 +497,6 @@ TEST_F(SSLTest, NoValidDowngrade)
 // socket and an SSL socket if 'SSL_SUPPORT_DOWNGRADE' is enabled.
 TEST_F(SSLTest, ValidDowngradeEachProtocol)
 {
-  const vector<string> protocols = {
-    // Openssl can be compiled with SSLV2 and/or SSLV3 disabled
-    // completely, so we conditionally test these protocol.
-#ifndef OPENSSL_NO_SSL2
-    "SSL_ENABLE_SSL_V2",
-#endif
-#ifndef OPENSSL_NO_SSL3
-    "SSL_ENABLE_SSL_V3",
-#endif
-    "SSL_ENABLE_TLS_V1_0",
-    "SSL_ENABLE_TLS_V1_1",
-    "SSL_ENABLE_TLS_V1_2"
-  };
-
   // For each protocol.
   foreach (const string& server_protocol, protocols) {
     LOG(INFO) << "Testing server protocol '" << server_protocol << "'\n";
@@ -826,20 +544,6 @@ TEST_F(SSLTest, ValidDowngradeEachProtocol)
 // enabled.
 TEST_F(SSLTest, NoValidDowngradeEachProtocol)
 {
-  const vector<string> protocols = {
-    // Openssl can be compiled with SSLV2 and/or SSLV3 disabled
-    // completely, so we conditionally test these protocol.
-#ifndef OPENSSL_NO_SSL2
-    "SSL_ENABLE_SSL_V2",
-#endif
-#ifndef OPENSSL_NO_SSL3
-    "SSL_ENABLE_SSL_V3",
-#endif
-    "SSL_ENABLE_TLS_V1_0",
-    "SSL_ENABLE_TLS_V1_1",
-    "SSL_ENABLE_TLS_V1_2"
-  };
-
   // For each protocol.
   foreach (const string& server_protocol, protocols) {
     LOG(INFO) << "Testing server protocol '" << server_protocol << "'\n";
@@ -912,6 +616,87 @@ TEST_F(SSLTest, PeerAddress)
   // peer is the client.
   ASSERT_SOME(client.address());
   ASSERT_SOME_EQ(client.address().get(), socket.get().peer());
+}
+
+
+// Basic Https GET test.
+TEST_F(SSLTest, HTTPSGet)
+{
+  Try<Socket> server = setup_server({
+      {"SSL_ENABLED", "true"},
+      {"SSL_KEY_FILE", key_path().value},
+      {"SSL_CERT_FILE", certificate_path().value}});
+
+  ASSERT_SOME(server);
+  ASSERT_SOME(server.get().address());
+  ASSERT_SOME(server.get().address().get().hostname());
+
+  Future<Socket> socket = server.get().accept();
+
+  // Create URL from server hostname and port.
+  const http::URL url(
+      "https",
+      server.get().address().get().hostname().get(),
+      server.get().address().get().port);
+
+  // Send GET request.
+  Future<http::Response> response = http::get(url);
+
+  AWAIT_ASSERT_READY(socket);
+
+  // Construct response and send(server side).
+  const string buffer =
+    string("HTTP/1.1 200 OK\r\n") +
+    "Content-Length : " +
+    stringify(data.length()) + "\r\n" +
+    "\r\n" +
+    data;
+  AWAIT_ASSERT_READY(Socket(socket.get()).send(buffer));
+
+  AWAIT_ASSERT_READY(response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  ASSERT_EQ(data, response.get().body);
+}
+
+
+// Basic Https POST test.
+TEST_F(SSLTest, HTTPSPost)
+{
+  Try<Socket> server = setup_server({
+      {"SSL_ENABLED", "true"},
+      {"SSL_KEY_FILE", key_path().value},
+      {"SSL_CERT_FILE", certificate_path().value}});
+
+  ASSERT_SOME(server);
+  ASSERT_SOME(server.get().address());
+  ASSERT_SOME(server.get().address().get().hostname());
+
+  Future<Socket> socket = server.get().accept();
+
+  // Create URL from server hostname and port.
+  const http::URL url(
+      "https",
+      server.get().address().get().hostname().get(),
+      server.get().address().get().port);
+
+  // Send POST request.
+  Future<http::Response> response =
+    http::post(url, None(), "payload", "text/plain");
+
+  AWAIT_ASSERT_READY(socket);
+
+  // Construct response and send(server side).
+  const string buffer =
+    string("HTTP/1.1 200 OK\r\n") +
+    "Content-Length : " +
+    stringify(data.length()) + "\r\n" +
+    "\r\n" +
+    data;
+  AWAIT_ASSERT_READY(Socket(socket.get()).send(buffer));
+
+  AWAIT_ASSERT_READY(response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  ASSERT_EQ(data, response.get().body);
 }
 
 #endif // USE_SSL_SOCKET

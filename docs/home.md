@@ -21,9 +21,11 @@ layout: documentation
 * [High Availability](/documentation/latest/high-availability/) for running multiple masters simultaneously.
 * [Operational Guide](/documentation/latest/operational-guide/)
 * [Monitoring](/documentation/latest/monitoring/)
-* [Network Monitoring](/documentation/latest/network-monitoring/)
+* [Network Monitoring and Isolation](/documentation/latest/network-monitoring/)
 * [Slave Recovery](/documentation/latest/slave-recovery/) for doing seamless upgrades.
+* [Maintenance](/documentation/latest/maintenance/) for performing maintenance on a Mesos cluster.
 * [Tools](/documentation/latest/tools/) for setting up and running a Mesos cluster.
+* [SSL](/documentation/latest/mesos-ssl/) for enabling and enforcing SSL communication.
 
 ## Running Mesos Frameworks
 

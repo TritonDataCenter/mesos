@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <gtest/gtest.h>
 
 #include <gmock/gmock.h>
@@ -12,7 +26,7 @@
 
 using namespace process;
 
-TEST(Limiter, Acquire)
+TEST(LimiterTest, Acquire)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -42,7 +56,7 @@ TEST(Limiter, Acquire)
 // In this test 4 permits are given, but the 2nd permit's acquire
 // is immediately discarded. So, 1st, 3rd and 4th permits should
 // be acquired according to the rate limit.
-TEST(Limiter, DiscardMiddle)
+TEST(LimiterTest, DiscardMiddle)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -80,7 +94,7 @@ TEST(Limiter, DiscardMiddle)
 // In this test 2 permits are initially given, but the 2nd permit's
 // future is immediately discarded. Then the 3rd permit is given. So,
 // 1st and 3rd permits should be acquired according to the rate limit.
-TEST(Limiter, DiscardLast)
+TEST(LimiterTest, DiscardLast)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 

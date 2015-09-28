@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_SYSTEM_HPP__
 #define __PROCESS_SYSTEM_HPP__
 
@@ -74,8 +88,6 @@ private:
     return HELP(
       TLDR(
           "Shows local system metrics."),
-      USAGE(
-          "/system/stats.json"),
       DESCRIPTION(
           ">        cpus_total          Total number of available CPUs",
           ">        load_1min           Average system load for last"
@@ -170,7 +182,7 @@ private:
       object.values["mem_free_bytes"] = memory.get().free.bytes();
     }
 
-    return http::OK(object, request.query.get("jsonp"));
+    return http::OK(object, request.url.query.get("jsonp"));
   }
 
   metrics::Gauge load_1min;

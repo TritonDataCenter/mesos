@@ -1,10 +1,26 @@
-#include <pthread.h>
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <unistd.h> // For getpid, getppid.
 
+#include <condition_variable>
 #include <iostream>
 #include <list>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 
 #include <gmock/gmock.h>
 
@@ -13,6 +29,7 @@
 #include <stout/numify.hpp>
 #include <stout/os.hpp>
 #include <stout/proc.hpp>
+#include <stout/synchronized.hpp>
 #include <stout/try.hpp>
 
 using proc::CPU;
@@ -74,33 +91,27 @@ TEST(ProcTest, SingleThread)
 }
 
 
-void* cancelFunction(void*)
-{
-  // Newly created threads have PTHREAD_CANCEL_ENABLE and
-  // PTHREAD_CANCEL_DEFERRED so they can be cancelled from the main
-  // thread.
-  while (true) {
-    // Use pthread_testcancel() as opposed to sleep() because we've
-    // seen sleep() hang on certain linux machines even though sleep
-    // should be a cancellation point.
-    pthread_testcancel();
-  }
-
-  return NULL;
-}
-
-
 // NOTE: This test assumes there is only a single thread running for the test.
 TEST(ProcTest, MultipleThreads)
 {
-  size_t numThreads = 5;
+  const size_t numThreads = 5;
 
-  pthread_t pthreads[numThreads];
+  std::thread* runningThreads[numThreads];
+
+  std::mutex mutex;
+  std::condition_variable cond;
+  bool stop = false;
 
   // Create additional threads.
-  for (size_t i = 0; i < numThreads; i++)
-  {
-    EXPECT_EQ(0, pthread_create(&pthreads[i], NULL, cancelFunction, NULL));
+  for (size_t i = 0; i < numThreads; i++) {
+    runningThreads[i] = new std::thread([&mutex, &cond, &stop]() {
+      // Wait until the main thread tells us to exit.
+      synchronized (mutex) {
+        while (!stop) {
+          synchronized_wait(&cond, &mutex);
+        }
+      }
+    });
   }
 
   // Check we have the expected number of threads.
@@ -110,11 +121,15 @@ TEST(ProcTest, MultipleThreads)
   EXPECT_EQ(1u + numThreads, threads.get().size());
   EXPECT_EQ(1u, threads.get().count(::getpid()));
 
-  // Terminate the threads.
-  for (size_t i = 0; i < numThreads; i++)
-  {
-    EXPECT_EQ(0, pthread_cancel(pthreads[i]));
-    EXPECT_EQ(0, pthread_join(pthreads[i], NULL));
+  // Terminate the additional threads.
+  synchronized (mutex) {
+    stop = true;
+    cond.notify_all();
+  }
+
+  for (size_t i = 0; i < numThreads; i++) {
+    runningThreads[i]->join();
+    delete runningThreads[i];
   }
 
   // There is some delay before /proc updates after the threads have

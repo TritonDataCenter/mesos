@@ -19,15 +19,15 @@
 #ifndef __NAMESPACES_PID_ISOLATOR_HPP__
 #define __NAMESPACES_PID_ISOLATOR_HPP__
 
-#include <mesos/slave/isolator.hpp>
-
-#include "slave/flags.hpp"
-
 #include <sys/types.h>
 
 #include <string>
 
 #include <stout/result.hpp>
+
+#include "slave/flags.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 namespace mesos {
 namespace internal {
@@ -37,7 +37,7 @@ namespace slave {
 // (see the LinuxLauncher for that) but it is used to keep track of a
 // container's pid namespace through a bind mount and exposed by
 // getNamespace().
-class NamespacesPidIsolatorProcess : public mesos::slave::IsolatorProcess
+class NamespacesPidIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
@@ -56,24 +56,21 @@ public:
 
   virtual ~NamespacesPidIsolatorProcess() {}
 
-  virtual process::Future<Option<int>> namespaces();
-
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(

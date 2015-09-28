@@ -1,3 +1,15 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License
+
 # Makefile for libprocess. Note that 3rdparty needs to be built
 # first (see 3rdparty/Makefile.am).
 
@@ -36,6 +48,7 @@ libprocess_la_SOURCES =		\
   src/decoder.hpp		\
   src/encoder.hpp		\
   src/event_loop.hpp		\
+  src/firewall.cpp		\
   src/gate.hpp			\
   src/help.cpp			\
   src/http.cpp			\
@@ -52,6 +65,7 @@ libprocess_la_SOURCES =		\
   src/reap.cpp			\
   src/socket.cpp		\
   src/subprocess.cpp		\
+  src/time.cpp			\
   src/timeseries.cpp
 
 if ENABLE_LIBEVENT
@@ -66,10 +80,10 @@ endif
 if ENABLE_SSL
 libprocess_la_SOURCES +=	\
     src/libevent_ssl_socket.cpp	\
+    src/libevent_ssl_socket.hpp	\
     src/openssl.cpp		\
     src/openssl.hpp		\
-    src/openssl_util.cpp	\
-    src/openssl_util.hpp
+    src/ssl/utilities.cpp
 endif
 
 libprocess_la_CPPFLAGS =			\
@@ -79,6 +93,8 @@ libprocess_la_CPPFLAGS =			\
   -I$(BOOST)					\
   -I$(LIBEV)					\
   -I$(PICOJSON)					\
+  -DPICOJSON_USE_INT64				\
+  -D__STDC_FORMAT_MACROS			\
   $(AM_CPPFLAGS)
 
 if ENABLE_LIBEVENT
@@ -123,8 +139,10 @@ endif
 check_PROGRAMS = tests benchmarks
 
 tests_SOURCES =							\
+  src/tests/collect_tests.cpp					\
   src/tests/decoder_tests.cpp					\
   src/tests/encoder_tests.cpp					\
+  src/tests/future_tests.cpp					\
   src/tests/http_tests.cpp					\
   src/tests/io_tests.cpp					\
   src/tests/limiter_tests.cpp					\

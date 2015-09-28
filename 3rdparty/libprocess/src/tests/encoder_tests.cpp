@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <gmock/gmock.h>
 
 #include <deque>
@@ -20,7 +34,7 @@ using std::string;
 using std::vector;
 
 
-TEST(Encoder, Response)
+TEST(EncoderTest, Response)
 {
   Request request;
   const OK response("body");
@@ -47,10 +61,10 @@ TEST(Encoder, Response)
 }
 
 
-TEST(Encoder, AcceptableEncodings)
+TEST(EncoderTest, AcceptableEncodings)
 {
   // Create requests that do not accept gzip encoding.
-  vector<Request> requests(7);
+  vector<Request> requests(10);
   requests[0].headers["Accept-Encoding"] = "gzip;q=0.0,*";
   requests[1].headers["Accept-Encoding"] = "compress";
   requests[2].headers["Accept-Encoding"] = "compress, gzip;q=0.0";
@@ -58,9 +72,12 @@ TEST(Encoder, AcceptableEncodings)
   requests[4].headers["Accept-Encoding"] = "*;q=0.0, compress";
   requests[5].headers["Accept-Encoding"] = "\n compress";
   requests[6].headers["Accept-Encoding"] = "compress,\tgzip;q=0.0";
+  requests[7].headers["Accept-Encoding"] = "gzipbug;q=0.1";
+  requests[8].headers["Accept-Encoding"] = "";
+  requests[9].headers["Accept-Encoding"] = ",";
 
   foreach (const Request& request, requests) {
-    EXPECT_FALSE(request.accepts("gzip"))
+    EXPECT_FALSE(request.acceptsEncoding("gzip"))
       << "Gzip encoding is unacceptable for 'Accept-Encoding: "
       << request.headers.get("Accept-Encoding").get() << "'";
   }
@@ -85,7 +102,7 @@ TEST(Encoder, AcceptableEncodings)
   gzipRequests[11].headers["Accept-Encoding"] = "gzip";
 
   foreach (const Request& gzipRequest, gzipRequests) {
-    EXPECT_TRUE(gzipRequest.accepts("gzip"))
+    EXPECT_TRUE(gzipRequest.acceptsEncoding("gzip"))
       << "Gzip encoding is acceptable for 'Accept-Encoding: "
       << gzipRequest.headers.get("Accept-Encoding").get() << "'";
   }

@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <glog/logging.h>
 
 #include <list>
@@ -54,7 +68,6 @@ string MetricsProcess::help()
 {
   return HELP(
       TLDR("Provides a snapshot of the current metrics."),
-      USAGE("/metrics/snapshot"),
       DESCRIPTION(
           "This endpoint provides information regarding the current metrics ",
           "tracked by the system.",
@@ -102,8 +115,8 @@ Future<http::Response> MetricsProcess::_snapshot(const http::Request& request)
   // Parse the 'timeout' parameter.
   Option<Duration> timeout;
 
-  if (request.query.contains("timeout")) {
-    string parameter = request.query.get("timeout").get();
+  if (request.url.query.contains("timeout")) {
+    string parameter = request.url.query.get("timeout").get();
 
     Try<Duration> duration = Duration::parse(parameter);
 
@@ -179,7 +192,7 @@ Future<http::Response> MetricsProcess::__snapshot(
     }
   }
 
-  return http::OK(object, request.query.get("jsonp"));
+  return http::OK(object, request.url.query.get("jsonp"));
 }
 
 }  // namespace internal {

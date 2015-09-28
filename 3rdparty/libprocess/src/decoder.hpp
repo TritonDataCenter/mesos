@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __DECODER_HPP__
 #define __DECODER_HPP__
 
@@ -94,13 +108,6 @@ private:
     CHECK(decoder->request == NULL);
 
     decoder->request = new http::Request();
-    decoder->request->headers.clear();
-    decoder->request->method.clear();
-    decoder->request->path.clear();
-    decoder->request->url.clear();
-    decoder->request->fragment.clear();
-    decoder->request->query.clear();
-    decoder->request->body.clear();
 
     return 0;
   }
@@ -110,7 +117,7 @@ private:
   {
     DataDecoder* decoder = (DataDecoder*) p->data;
     CHECK_NOTNULL(decoder->request);
-    decoder->request->path.append(data, length);
+    decoder->request->url.path.append(data, length);
     return 0;
   }
 
@@ -126,7 +133,12 @@ private:
   {
     DataDecoder* decoder = (DataDecoder*) p->data;
     CHECK_NOTNULL(decoder->request);
-    decoder->request->fragment.append(data, length);
+
+    if (decoder->request->url.fragment.isNone()) {
+      decoder->request->url.fragment = "";
+    }
+
+    decoder->request->url.fragment->append(data, length);
     return 0;
   }
 #endif // !(HTTP_PARSER_VERSION_MAJOR >= 2)
@@ -135,7 +147,6 @@ private:
   {
     DataDecoder* decoder = (DataDecoder*) p->data;
     CHECK_NOTNULL(decoder->request);
-    decoder->request->url.append(data, length);
     int result = 0;
 
 #if (HTTP_PARSER_VERSION_MAJOR >= 2)
@@ -234,7 +245,7 @@ private:
 
     CHECK_NOTNULL(decoder->request);
 
-    decoder->request->query =  decoded.get();
+    decoder->request->url.query = decoded.get();
 
     Option<std::string> encoding =
       decoder->request->headers.get("Content-Encoding");
@@ -261,7 +272,8 @@ private:
   http_parser parser;
   http_parser_settings settings;
 
-  enum {
+  enum
+  {
     HEADER_FIELD,
     HEADER_VALUE
   } header;
@@ -456,7 +468,8 @@ private:
   http_parser parser;
   http_parser_settings settings;
 
-  enum {
+  enum
+  {
     HEADER_FIELD,
     HEADER_VALUE
   } header;
@@ -687,7 +700,8 @@ private:
   http_parser parser;
   http_parser_settings settings;
 
-  enum {
+  enum
+  {
     HEADER_FIELD,
     HEADER_VALUE
   } header;
