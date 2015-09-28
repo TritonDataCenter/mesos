@@ -92,7 +92,7 @@ bool enabled();
 // Return the currently active hierarchies.
 // @return  A set of active hierarchy paths (e.g., '/cgroup').
 //          Error if unexpected happens.
-Try<std::set<std::string> > hierarchies();
+Try<std::set<std::string>> hierarchies();
 
 
 // Get an already mounted hierarchy that has 'subsystems' attached.
@@ -127,7 +127,7 @@ Try<bool> busy(const std::string& subsystems);
 // Return the currently enabled subsystems.
 // @return  A set of enabled subsystem names if succeeds.
 //          Error if unexpected happens.
-Try<std::set<std::string> > subsystems();
+Try<std::set<std::string>> subsystems();
 
 
 // Return a set of subsystems that are attached to a given hierarchy. An error
@@ -137,7 +137,7 @@ Try<std::set<std::string> > subsystems();
 // @param   hierarchy   Path to the hierarchy root.
 // @return  A set of attached subsystem names.
 //          Error otherwise, (e.g., hierarchy does not exist or is not mounted).
-Try<std::set<std::string> > subsystems(const std::string& hierarchy);
+Try<std::set<std::string>> subsystems(const std::string& hierarchy);
 
 
 // Mount a cgroups hierarchy and attach the given subsystems to
@@ -219,7 +219,7 @@ Try<bool> exists(const std::string& hierarchy, const std::string& cgroup);
 // not exist. We use a post-order walk here to ease the removal of cgroups.
 // @param   hierarchy   Path to the hierarchy root.
 // @return  A vector of cgroup names.
-Try<std::vector<std::string> > get(
+Try<std::vector<std::string>> get(
     const std::string& hierarchy,
     const std::string& cgroup = "/");
 
@@ -285,7 +285,7 @@ Try<bool> exists(
 // @param   hierarchy   Path to the hierarchy root.
 // @param   cgroup      Path to the cgroup relative to the hierarchy root.
 // @return  The set of process ids.
-Try<std::set<pid_t> > processes(
+Try<std::set<pid_t>> processes(
     const std::string& hierarchy,
     const std::string& cgroup);
 
@@ -295,7 +295,7 @@ Try<std::set<pid_t> > processes(
 // @param   hierarchy   Path to the hierarchy root.
 // @param   cgroup      Path to the cgroup relative to the hierarchy root.
 // @return  The set of thread ids.
-Try<std::set<pid_t> > threads(
+Try<std::set<pid_t>> threads(
     const std::string& hierarchy,
     const std::string& cgroup);
 
@@ -382,7 +382,7 @@ process::Future<bool> cleanup(const std::string& hierarchy);
 //          Error if reading or parsing fails.
 // TODO(bmahler): Consider namespacing stat for each subsystem (e.g.
 // cgroups::memory::stat and cgroups::cpuacct::stat).
-Try<hashmap<std::string, uint64_t> > stat(
+Try<hashmap<std::string, uint64_t>> stat(
     const std::string& hierarchy,
     const std::string& cgroup,
     const std::string& file);
@@ -430,6 +430,41 @@ Try<Nothing> cfs_quota_us(
     const Duration& duration);
 
 } // namespace cpu {
+
+
+// Cpuacct subsystem.
+namespace cpuacct {
+
+// Returns the cgroup that the specified pid is a member of within the
+// hierarchy that the 'cpuacct' subsytem is mounted or None if the
+// subsystem is not mounted or the pid is not a member of a cgroup.
+//
+// @param   pid   process id for which cgroup is queried within the cpuacct
+//                subsytem.
+// @return  Some cgroup in case there was a valid cgroup found for the pid.
+//          Error if there was any error in processing.
+Result<std::string> cgroup(pid_t pid);
+
+
+// Encapsulates the 'stat' information exposed by the cpuacct subsystem.
+struct Stats
+{
+  const Duration user;
+  const Duration system;
+};
+
+
+// Returns 'Stats' for a given hierarchy and cgroup.
+//
+// @param   hierarchy   hierarchy for the 'cpuacct' subsystem.
+// @param   cgroup      cgroup for a given process.
+// @return  Some<Stats> if sucessful.
+//          Error in case of any error during processing.
+Try<Stats> stat(
+    const std::string& hierarchy,
+    const std::string& cgroup);
+
+} // namespace cpuacct {
 
 
 // Memory controls.
@@ -538,14 +573,15 @@ Try<Nothing> disable(
 // Memory pressure counters.
 namespace pressure {
 
-enum Level {
+enum Level
+{
   LOW,
   MEDIUM,
   CRITICAL
 };
 
 
-std::ostream& operator << (std::ostream& stream, Level level);
+std::ostream& operator<<(std::ostream& stream, Level level);
 
 
 // Forward declaration.
@@ -614,5 +650,23 @@ process::Future<Nothing> thaw(
 } // namespace freezer {
 
 } // namespace cgroups {
+
+namespace std {
+
+template <>
+struct hash<cgroups::memory::pressure::Level>
+{
+  typedef size_t result_type;
+
+  typedef cgroups::memory::pressure::Level argument_type;
+
+  result_type operator()(const argument_type& level) const
+  {
+    // Use the underlying type of the enum as hash value.
+    return static_cast<size_t>(level);
+  }
+};
+
+} // namespace std {
 
 #endif // __CGROUPS_HPP__

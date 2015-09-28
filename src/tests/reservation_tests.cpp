@@ -363,7 +363,7 @@ TEST_F(ReservationTest, ReserveShareWithinRole)
 
   // The filter to decline the offer "forever".
   Filters filtersForever;
-  filters.set_refuse_seconds(std::numeric_limits<double>::max());
+  filtersForever.set_refuse_seconds(std::numeric_limits<double>::max());
 
   // Decline the offer "forever" in order to force framework2 to
   // receive the resources.
@@ -410,7 +410,7 @@ TEST_F(ReservationTest, DropReserveTooLarge)
   masterFlags.allocation_interval = Milliseconds(50);
   masterFlags.roles = frameworkInfo.role();
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
@@ -418,7 +418,7 @@ TEST_F(ReservationTest, DropReserveTooLarge)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.resources = "cpus:1;mem:512";
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave>> slave = StartSlave(slaveFlags);
   ASSERT_SOME(slave);
@@ -501,7 +501,7 @@ TEST_F(ReservationTest, DropReserveStaticReservation)
   masterFlags.allocation_interval = Milliseconds(50);
   masterFlags.roles = frameworkInfo.role();
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master>> master = StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
@@ -509,7 +509,7 @@ TEST_F(ReservationTest, DropReserveStaticReservation)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.resources = "cpus(role):1;mem(role):512";
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Try<PID<Slave>> slave = StartSlave(slaveFlags);
   ASSERT_SOME(slave);
@@ -617,7 +617,7 @@ TEST_F(ReservationTest, SendingCheckpointResourcesMessage)
   // The expectation for the first offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return());
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -714,7 +714,7 @@ TEST_F(ReservationTest, ResourcesCheckpointing)
   // The expectation for the offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return());
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -805,7 +805,7 @@ TEST_F(ReservationTest, MasterFailover)
   // The expectation for the first offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return());
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -924,7 +924,8 @@ TEST_F(ReservationTest, CompatibleCheckpointedResources)
 
   // The expectation for the first offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -1039,7 +1040,7 @@ TEST_F(ReservationTest, CompatibleCheckpointedResourcesWithPersistentVolumes)
 
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return());
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -1154,7 +1155,7 @@ TEST_F(ReservationTest, IncompatibleCheckpointedResources)
 
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return());
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 

@@ -54,7 +54,7 @@ public:
   // Return the set of containers that are known to the launcher but
   // not known to the slave (a.k.a. orphans).
   virtual process::Future<hashset<ContainerID>> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states) = 0;
+      const std::list<mesos::slave::ContainerState>& states) = 0;
 
   // Fork a new process in the containerized context. The child will
   // exec the binary at the given path with the given argv, flags and
@@ -72,7 +72,8 @@ public:
       const process::Subprocess::IO& err,
       const Option<flags::FlagsBase>& flags,
       const Option<std::map<std::string, std::string>>& environment,
-      const Option<lambda::function<int()>>& setup) = 0;
+      const Option<lambda::function<int()>>& setup,
+      const Option<int>& namespaces) = 0;
 
   // Kill all processes in the containerized context.
   virtual process::Future<Nothing> destroy(const ContainerID& containerId) = 0;
@@ -91,7 +92,7 @@ public:
   virtual ~PosixLauncher() {}
 
   virtual process::Future<hashset<ContainerID>> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states);
+      const std::list<mesos::slave::ContainerState>& states);
 
   virtual Try<pid_t> fork(
       const ContainerID& containerId,
@@ -102,7 +103,8 @@ public:
       const process::Subprocess::IO& err,
       const Option<flags::FlagsBase>& flags,
       const Option<std::map<std::string, std::string>>& environment,
-      const Option<lambda::function<int()>>& setup);
+      const Option<lambda::function<int()>>& setup,
+      const Option<int>& namespaces);
 
   virtual process::Future<Nothing> destroy(const ContainerID& containerId);
 

@@ -95,10 +95,16 @@ static Future<Nothing> checkError(const string& cmd, const Subprocess& s)
     .then(lambda::bind(_checkError, cmd, s));
 }
 
-
-Try<Docker*> Docker::create(const string& path, bool validate)
+Try<Docker*> Docker::create(
+    const string& path,
+    const string& socket,
+    bool validate)
 {
-  Docker* docker = new Docker(path);
+  if (!strings::startsWith(socket, "/")) {
+    return Error("Invalid Docker socket path: " + socket);
+  }
+
+  Docker* docker = new Docker(path, socket);
   if (!validate) {
     return docker;
   }
@@ -118,22 +124,10 @@ Try<Docker*> Docker::create(const string& path, bool validate)
 #endif // __linux__
 */
 
-  // Validate the version (and that we can use Docker at all).
-  Future<Version> version = docker->version();
-
-  if (!version.await(DOCKER_VERSION_WAIT_TIMEOUT)) {
+  Try<Nothing> validateVersion = docker->validateVersion(Version(1, 0, 0));
+  if (validateVersion.isError()) {
     delete docker;
-    return Error("Timed out getting docker version");
-  }
-
-  if (version.isFailed()) {
-    delete docker;
-    return Error("Failed to get docker version: " + version.failure());
-  }
-
-  if (version.get() < Version(1, 0, 0)) {
-    delete docker;
-    return Error("Insufficient version of Docker. Please upgrade to >= 1.0.0");
+    return Error(validateVersion.error());
   }
 
   return docker;
@@ -149,7 +143,7 @@ void commandDiscarded(const Subprocess& s, const string& cmd)
 
 Future<Version> Docker::version() const
 {
-  string cmd = path + " --version";
+  string cmd = path + " -H " + socket + " --version";
 
   Try<Subprocess> s = subprocess(
       cmd,
@@ -194,7 +188,18 @@ Future<Version> Docker::__version(const Future<string>& output)
     vector<string> subParts = strings::split(parts.front(), " ");
 
     if (!subParts.empty()) {
-      Try<Version> version = Version::parse(subParts.back());
+      // Docker version output in Fedora 22 is "x.x.x.fc22" which does not match
+      // the Semantic Versioning specification(<major>[.<minor>[.<patch>]]). We
+      // remove the overflow components here before parsing the docker version
+      // output to a Version struct.
+      string versionString = subParts.back();
+      vector<string> components = strings::split(versionString, ".");
+      if (components.size() > 3) {
+        components.erase(components.begin() + 3, components.end());
+      }
+      versionString = strings::join(".", components);
+
+      Try<Version> version = Version::parse(versionString);
 
       if (version.isError()) {
         return Failure("Failed to parse docker version: " +
@@ -209,6 +214,31 @@ Future<Version> Docker::__version(const Future<string>& output)
 }
 
 
+Try<Nothing> Docker::validateVersion(const Version& minVersion) const
+{
+  // Validate the version (and that we can use Docker at all).
+  Future<Version> version = this->version();
+
+  if (!version.await(DOCKER_VERSION_WAIT_TIMEOUT)) {
+    return Error("Timed out getting docker version");
+  }
+
+  if (version.isFailed()) {
+    return Error("Failed to get docker version: " + version.failure());
+  }
+
+  if (version.get() < minVersion) {
+    string msg = "Insufficient version '" + stringify(version.get()) +
+                 "' of Docker. Please upgrade to >=' " +
+                 stringify(minVersion) + "'";
+    return Error(msg);
+  }
+
+  return Nothing();
+}
+
+
+// TODO(josephw): Parse this string with a protobuf.
 Try<Docker::Container> Docker::Container::create(const string& output)
 {
   Try<JSON::Array> parse = JSON::parse<JSON::Array>(output);
@@ -259,7 +289,7 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     return Error("Error finding Pid in State: " + pidValue.error());
   }
 
-  pid_t pid = pid_t(pidValue.get().value);
+  pid_t pid = pid_t(pidValue.get().as<int64_t>());
 
   Option<pid_t> optionalPid;
   if (pid != 0) {
@@ -276,7 +306,19 @@ Try<Docker::Container> Docker::Container::create(const string& output)
 
   bool started = startedAtValue.get().value != "0001-01-01T00:00:00Z";
 
-  return Docker::Container(output, id, name, optionalPid, started);
+  Result<JSON::String> ipAddressValue =
+    json.find<JSON::String>("NetworkSettings.IPAddress");
+  if (ipAddressValue.isNone()) {
+    return Error("Unable to find NetworkSettings.IPAddress in container");
+  } else if (ipAddressValue.isError()) {
+    return Error(
+        "Error finding NetworkSettings.Name in container: " +
+        ipAddressValue.error());
+  }
+
+  string ipAddress = ipAddressValue.get().value;
+
+  return Docker::Container(output, id, name, optionalPid, started, ipAddress);
 }
 
 
@@ -338,6 +380,8 @@ Future<Nothing> Docker::run(
 
   vector<string> argv;
   argv.push_back(path);
+  argv.push_back("-H");
+  argv.push_back(socket);
   argv.push_back("run");
 
   if (dockerInfo.privileged()) {
@@ -382,6 +426,8 @@ Future<Nothing> Docker::run(
 
   argv.push_back("-e");
   argv.push_back("MESOS_SANDBOX=" + mappedDirectory);
+  argv.push_back("-e");
+  argv.push_back("MESOS_CONTAINER_NAME=" + name);
 
   /*
 
@@ -589,7 +635,7 @@ Future<Nothing> Docker::stop(
                    stringify(timeoutSecs));
   }
 
-  string cmd = path + " stop -t " + stringify(timeoutSecs) +
+  string cmd = path + " -H " + socket + " stop -t " + stringify(timeoutSecs) +
                " " + containerName;
 
   VLOG(1) << "Running " << cmd;
@@ -636,7 +682,9 @@ Future<Nothing> Docker::rm(
     const string& containerName,
     bool force) const
 {
-  const string cmd = path + (force ? " rm -f " : " rm ") + containerName;
+  const string cmd =
+    path + " -H " + socket +
+    (force ? " rm -f " : " rm ") + containerName;
 
   VLOG(1) << "Running " << cmd;
 
@@ -660,7 +708,7 @@ Future<Docker::Container> Docker::inspect(
 {
   Owned<Promise<Docker::Container>> promise(new Promise<Docker::Container>());
 
-  const string cmd =  path + " inspect " + containerName;
+  const string cmd =  path + " -H " + socket + " inspect " + containerName;
   _inspect(cmd, promise, retryInterval);
 
   return promise->future();
@@ -794,7 +842,7 @@ Future<list<Docker::Container>> Docker::ps(
     bool all,
     const Option<string>& prefix) const
 {
-  string cmd = path + (all ? " ps -a" : " ps");
+  string cmd = path + " -H " + socket + (all ? " ps -a" : " ps");
 
   VLOG(1) << "Running " << cmd;
 
@@ -851,28 +899,83 @@ Future<list<Docker::Container>> Docker::__ps(
     const Option<string>& prefix,
     const string& output)
 {
-  vector<string> lines = strings::tokenize(output, "\n");
+  Owned<vector<string>> lines(new vector<string>());
+  *lines = strings::tokenize(output, "\n");
 
   // Skip the header.
-  CHECK(!lines.empty());
-  lines.erase(lines.begin());
+  CHECK(!lines->empty());
+  lines->erase(lines->begin());
 
-  list<Future<Docker::Container>> futures;
+  Owned<list<Docker::Container>> containers(new list<Docker::Container>());
 
-  foreach (const string& line, lines) {
+  Owned<Promise<list<Docker::Container>>> promise(
+    new Promise<list<Docker::Container>>());
+
+  // Limit number of parallel calls to docker inspect at once to prevent
+  // reaching system's open file descriptor limit.
+  inspectBatches(containers, lines, promise, docker, prefix);
+
+  return promise->future();
+}
+
+// TODO(chenlily): Generalize functionality into a concurrency limiter
+// within libprocess.
+void Docker::inspectBatches(
+    Owned<list<Docker::Container>> containers,
+    Owned<vector<string>> lines,
+    Owned<Promise<list<Docker::Container>>> promise,
+    const Docker& docker,
+    const Option<string>& prefix)
+{
+  list<Future<Docker::Container>> batch =
+    createInspectBatch(lines, docker, prefix);
+
+  collect(batch).onAny([=](const Future<list<Docker::Container>>& c) {
+    if (c.isReady()) {
+      foreach (const Docker::Container& container, c.get()) {
+        containers->push_back(container);
+      }
+      if (lines->empty()) {
+        promise->set(*containers);
+      }
+      else {
+        inspectBatches(containers, lines, promise, docker, prefix);
+      }
+    } else {
+      if (c.isFailed()) {
+        promise->fail("Docker ps batch failed " + c.failure());
+      }
+      else {
+        promise->fail("Docker ps batch discarded");
+      }
+    }
+  });
+}
+
+
+list<Future<Docker::Container>> Docker::createInspectBatch(
+    Owned<vector<string>> lines,
+    const Docker& docker,
+    const Option<string>& prefix)
+{
+  list<Future<Docker::Container>> batch;
+
+  while (!lines->empty() && batch.size() < DOCKER_PS_MAX_INSPECT_CALLS) {
+    string line = lines->back();
+    lines->pop_back();
+
     // Inspect the containers that we are interested in depending on
     // whether or not a 'prefix' was specified.
     vector<string> columns = strings::split(strings::trim(line), " ");
+
     // We expect the name column to be the last column from ps.
     string name = columns[columns.size() - 1];
-    if (prefix.isNone()) {
-      futures.push_back(docker.inspect(name));
-    } else if (strings::startsWith(name, prefix.get())) {
-      futures.push_back(docker.inspect(name));
+    if (prefix.isNone() || strings::startsWith(name, prefix.get())) {
+      batch.push_back(docker.inspect(name));
     }
   }
 
-  return collect(futures);
+  return batch;
 }
 
 
@@ -898,10 +1001,12 @@ Future<Docker::Image> Docker::pull(
 
   if (force) {
     // Skip inspect and docker pull the image.
-    return Docker::__pull(*this, directory, image, path);
+    return Docker::__pull(*this, directory, image, path, socket);
   }
 
   argv.push_back(path);
+  argv.push_back("-H");
+  argv.push_back(socket);
   argv.push_back("inspect");
   argv.push_back(dockerImage);
 
@@ -936,6 +1041,7 @@ Future<Docker::Image> Docker::pull(
         directory,
         dockerImage,
         path,
+        socket,
         output));
 }
 
@@ -946,6 +1052,7 @@ Future<Docker::Image> Docker::_pull(
     const string& directory,
     const string& image,
     const string& path,
+    const string& socket,
     Future<string> output)
 {
   Option<int> status = s.status().get();
@@ -956,7 +1063,7 @@ Future<Docker::Image> Docker::_pull(
 
   output.discard();
 
-  return Docker::__pull(docker, directory, image, path);
+  return Docker::__pull(docker, directory, image, path, socket);
 }
 
 
@@ -964,10 +1071,13 @@ Future<Docker::Image> Docker::__pull(
     const Docker& docker,
     const string& directory,
     const string& image,
-    const string& path)
+    const string& path,
+    const string& socket)
 {
   vector<string> argv;
   argv.push_back(path);
+  argv.push_back("-H");
+  argv.push_back(socket);
   argv.push_back("pull");
   argv.push_back(image);
 

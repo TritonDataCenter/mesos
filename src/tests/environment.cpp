@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 
 #include <string.h>
+#include <unistd.h>
 
 #include <list>
 #include <set>
@@ -39,8 +40,11 @@
 #include <stout/os.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/shell.hpp>
+
 #ifdef __linux__
 #include "linux/cgroups.hpp"
+#include "linux/fs.hpp"
 #endif
 
 #ifdef WITH_NETWORK_ISOLATOR
@@ -124,20 +128,30 @@ public:
   CgroupsFilter()
   {
 #ifdef __linux__
-    Try<set<string> > hierarchies_ = cgroups::hierarchies();
-    CHECK_SOME(hierarchies_);
-    if (!hierarchies_.get().empty()) {
+    Try<set<string> > hierarchies = cgroups::hierarchies();
+    if (hierarchies.isError()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "We cannot run any cgroups tests that require mounting\n"
+        << "hierarchies because reading cgroup heirarchies failed:\n"
+        << hierarchies.error() << "\n"
+        << "We'll disable the CgroupsNoHierarchyTest test fixture for now.\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+
+      error = hierarchies.error();
+    } else if (!hierarchies.get().empty()) {
       std::cerr
         << "-------------------------------------------------------------\n"
         << "We cannot run any cgroups tests that require mounting\n"
         << "hierarchies because you have the following hierarchies mounted:\n"
-        << strings::trim(stringify(hierarchies_.get()), " {},") << "\n"
+        << strings::trim(stringify(hierarchies.get()), " {},") << "\n"
         << "We'll disable the CgroupsNoHierarchyTest test fixture for now.\n"
         << "-------------------------------------------------------------"
         << std::endl;
-    }
 
-    hierarchies = hierarchies_.get();
+      error = Error("Hierarchies exist");
+    }
 #endif // __linux__
   }
 
@@ -151,7 +165,7 @@ public:
       if (matches(test, "NOHIERARCHY_")) {
         return user.get() != "root" ||
                !cgroups::enabled() ||
-               !hierarchies.empty();
+               error.isSome();
       }
 
       return user.get() != "root" || !cgroups::enabled();
@@ -164,7 +178,7 @@ public:
   }
 
 private:
-  set<string> hierarchies;
+  Option<Error> error;
 };
 
 
@@ -174,7 +188,7 @@ public:
   DockerFilter()
   {
 #ifdef __linux__
-    Try<Docker*> docker = Docker::create(flags.docker);
+    Try<Docker*> docker = Docker::create(flags.docker, flags.docker_socket);
     if (docker.isError()) {
       dockerError = docker.error();
     } else {
@@ -239,6 +253,31 @@ private:
 };
 
 
+class NetcatFilter : public TestFilter
+{
+public:
+  NetcatFilter()
+  {
+    netcatError = os::system("which nc") != 0;
+    if (netcatError) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'nc' command found so no tests depending on 'nc' will run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return matches(test, "NC_") && netcatError;
+  }
+
+private:
+  bool netcatError;
+};
+
+
 class BenchmarkFilter : public TestFilter
 {
 public:
@@ -270,15 +309,6 @@ public:
 
   bool disable(const ::testing::TestInfo* test) const
   {
-#ifdef WITH_NETWORK_ISOLATOR
-    // PortMappingIsolatorProcess doesn't suport test
-    // 'SlaveRecoveryTest.MultipleSlaves'.
-    if (matches(test, "SlaveRecoveryTest") &&
-        matches(test, "MultipleSlaves")) {
-      return true;
-    }
-#endif
-
     if (matches(test, "PortMappingIsolatorTest") ||
         matches(test, "PortMappingMesosTest")) {
 #ifdef WITH_NETWORK_ISOLATOR
@@ -368,6 +398,7 @@ Environment::Environment(const Flags& _flags) : flags(_flags)
   filters.push_back(Owned<TestFilter>(new BenchmarkFilter()));
   filters.push_back(Owned<TestFilter>(new NetworkIsolatorTestFilter()));
   filters.push_back(Owned<TestFilter>(new PerfFilter()));
+  filters.push_back(Owned<TestFilter>(new NetcatFilter()));
 
   // Construct the filter string to handle system or platform specific tests.
   ::testing::UnitTest* unitTest = ::testing::UnitTest::GetInstance();
@@ -424,6 +455,22 @@ void Environment::SetUp()
 void Environment::TearDown()
 {
   foreach (const string& directory, directories) {
+#ifdef __linux__
+    // Try to remove any mounts under 'directory'.
+    if (::geteuid() == 0) {
+      Try<string> umount = os::shell(
+          "grep '%s' /proc/mounts | "
+          "cut -d' ' -f2 | "
+          "xargs --no-run-if-empty umount -l",
+          directory.c_str());
+
+      if (umount.isError()) {
+        LOG(ERROR) << "Failed to umount for directory '" << directory
+                   << "': " << umount.error();
+      }
+    }
+#endif
+
     Try<Nothing> rmdir = os::rmdir(directory);
     if (rmdir.isError()) {
       LOG(ERROR) << "Failed to remove '" << directory

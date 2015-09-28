@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <ev.h>
 
 #include <mutex>
@@ -6,17 +20,20 @@
 #include <stout/duration.hpp>
 #include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
+#include <stout/thread_local.hpp>
 
 #include "event_loop.hpp"
 #include "libev.hpp"
 
 namespace process {
 
-// Defines the initial values for all of the declarations made in
+ev_async async_watcher;
+// We need an asynchronous watcher to receive the request to shutdown.
+ev_async shutdown_watcher;
+
+// Define the initial values for all of the declarations made in
 // libev.hpp (since these need to live in the static data space).
 struct ev_loop* loop = NULL;
-
-ev_async async_watcher;
 
 std::queue<ev_io*>* watchers = new std::queue<ev_io*>();
 
@@ -25,11 +42,12 @@ std::mutex* watchers_mutex = new std::mutex();
 std::queue<lambda::function<void(void)>>* functions =
   new std::queue<lambda::function<void(void)>>();
 
-ThreadLocal<bool>* _in_event_loop_ = new ThreadLocal<bool>();
+THREAD_LOCAL bool* _in_event_loop_ = NULL;
 
 
 void handle_async(struct ev_loop* loop, ev_async* _, int revents)
 {
+  std::queue<lambda::function<void(void)>> run_functions;
   synchronized (watchers_mutex) {
     // Start all the new I/O watchers.
     while (!watchers->empty()) {
@@ -38,11 +56,29 @@ void handle_async(struct ev_loop* loop, ev_async* _, int revents)
       ev_io_start(loop, watcher);
     }
 
-    while (!functions->empty()) {
-      (functions->front())();
-      functions->pop();
-    }
+    // Swap the functions into a temporary queue so that we can invoke
+    // them outside of the mutex.
+    std::swap(run_functions, *functions);
   }
+
+  // Running the functions outside of the mutex reduces locking
+  // contention as these are arbitrary functions that can take a long
+  // time to execute. Doing this also avoids a deadlock scenario where
+  // (A) mutexes are acquired before calling `run_in_event_loop`,
+  // followed by locking (B) `watchers_mutex`. If we executed the
+  // functions inside the mutex, then the locking order violation
+  // would be this function acquiring the (B) `watchers_mutex`
+  // followed by the arbitrary function acquiring the (A) mutexes.
+  while (!run_functions.empty()) {
+    (run_functions.front())();
+    run_functions.pop();
+  }
+}
+
+
+void handle_shutdown(struct ev_loop* loop, ev_async* _, int revents)
+{
+  ev_unloop(loop, EVUNLOOP_ALL);
 }
 
 
@@ -51,7 +87,10 @@ void EventLoop::initialize()
   loop = ev_default_loop(EVFLAG_AUTO);
 
   ev_async_init(&async_watcher, handle_async);
+  ev_async_init(&shutdown_watcher, handle_shutdown);
+
   ev_async_start(loop, &async_watcher);
+  ev_async_start(loop, &shutdown_watcher);
 }
 
 
@@ -113,15 +152,18 @@ double EventLoop::time()
 }
 
 
-void* EventLoop::run(void*)
+void EventLoop::run()
 {
   __in_event_loop__ = true;
 
   ev_loop(loop, 0);
 
   __in_event_loop__ = false;
+}
 
-  return NULL;
+void EventLoop::stop()
+{
+  ev_async_send(loop, &shutdown_watcher);
 }
 
 } // namespace process {

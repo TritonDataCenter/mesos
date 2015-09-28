@@ -18,9 +18,6 @@
 
 #include <stdint.h>
 
-#include <vector>
-
-#include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 #include <mesos/values.hpp>
 
@@ -32,7 +29,6 @@
 #include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
-#include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
 #include <stout/nothing.hpp>
 #include <stout/os.hpp>
@@ -41,9 +37,6 @@
 #include <stout/try.hpp>
 
 #include "linux/cgroups.hpp"
-#include "linux/sched.hpp"
-
-#include "slave/flags.hpp"
 
 #include "slave/containerizer/isolators/cgroups/cpushare.hpp"
 
@@ -54,10 +47,10 @@ using std::set;
 using std::string;
 using std::vector;
 
-using mesos::slave::ExecutorRunState;
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
 
 namespace mesos {
 namespace internal {
@@ -164,19 +157,19 @@ Try<Isolator*> CgroupsCpushareIsolatorProcess::create(const Flags& flags)
     }
   }
 
-  process::Owned<IsolatorProcess> process(
+  process::Owned<MesosIsolatorProcess> process(
       new CgroupsCpushareIsolatorProcess(flags, hierarchies, subsystems));
 
-  return new Isolator(process);
+  return new MesosIsolator(process);
 }
 
 
 Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
-  foreach (const ExecutorRunState& state, states) {
-    const ContainerID& containerId = state.id;
+  foreach (const ContainerState& state, states) {
+    const ContainerID& containerId = state.container_id();
     const string cgroup = path::join(flags.cgroups_root, containerId.value());
 
     Try<bool> exists = cgroups::exists(hierarchies["cpu"], cgroup);
@@ -252,11 +245,10 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
 }
 
 
-Future<Option<CommandInfo>> CgroupsCpushareIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> CgroupsCpushareIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (infos.contains(containerId)) {
@@ -300,7 +292,7 @@ Future<Option<CommandInfo>> CgroupsCpushareIsolatorProcess::prepare(
   }
 
   return update(containerId, executorInfo.resources())
-    .then([]() -> Future<Option<CommandInfo>> {
+    .then([]() -> Future<Option<ContainerPrepareInfo>> {
       return None();
     });
 }
@@ -335,30 +327,11 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::isolate(
     }
   }
 
-  // NOTE: This only sets the executor and descendants to IDLE policy
-  // if the initial CPU resource is revocable and not if initial CPU
-  // is non-revocable but subsequent updates include revocable CPU.
-  if (info->resources.isSome() &&
-      info->resources.get().revocable().cpus().isSome() &&
-      flags.revocable_cpu_low_priority) {
-    Try<Nothing> set = sched::policy::set(sched::Policy::IDLE, pid);
-    if (set.isError()) {
-      return Failure("Failed to set SCHED_IDLE for pid " + stringify(pid) +
-                     " in container '" + stringify(containerId) + "'" +
-                     " with revocable CPU: " + set.error());
-    }
-
-    LOG(INFO) << "Set scheduling policy to SCHED_IDLE for pid " << pid
-              << " in container '" << containerId << "' because it includes '"
-              << info->resources.get().revocable().cpus().get()
-              << "' revocable CPU";
-  }
-
   return Nothing();
 }
 
 
-Future<Limitation> CgroupsCpushareIsolatorProcess::watch(
+Future<ContainerLimitation> CgroupsCpushareIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   if (!infos.contains(containerId)) {
@@ -394,8 +367,18 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::update(
   double cpus = resources.cpus().get();
 
   // Always set cpu.shares.
-  uint64_t shares =
-    std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus), MIN_CPU_SHARES);
+  uint64_t shares;
+
+  if (flags.revocable_cpu_low_priority &&
+      resources.revocable().cpus().isSome()) {
+    shares = std::max(
+        (uint64_t) (CPU_SHARES_PER_CPU_REVOCABLE * cpus),
+        MIN_CPU_SHARES);
+  } else {
+    shares = std::max(
+        (uint64_t) (CPU_SHARES_PER_CPU * cpus),
+        MIN_CPU_SHARES);
+  }
 
   Try<Nothing> write = cgroups::cpu::shares(
       hierarchy.get(),

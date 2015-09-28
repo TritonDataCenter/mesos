@@ -34,6 +34,9 @@
 
 using namespace mesos;
 
+using std::map;
+using std::string;
+
 using process::Future;
 
 // Must be kept in sync with variables of the same name in
@@ -45,13 +48,36 @@ const char* testRemoveLabelKey = "MESOS_Test_Remove_Label";
 class HookProcess : public ProtobufProcess<HookProcess>
 {
 public:
-  Future<Nothing> signal()
+  void initialize()
   {
+    install<internal::HookExecuted>(
+        &HookProcess::handler,
+        &internal::HookExecuted::module);
+  }
+
+  void signal()
+  {
+    LOG(INFO) << "HookProcess emitting signal";
+
     internal::HookExecuted message;
     message.set_module("org_apache_mesos_TestHook");
     send(self(), message);
-    return Nothing();
   }
+
+  void handler(const process::UPID& from, const string& module)
+  {
+    LOG(INFO) << "HookProcess caught signal: " << module;
+
+    promise.set(Nothing());
+  }
+
+  Future<Nothing> await()
+  {
+    return promise.future();
+  }
+
+private:
+  process::Promise<Nothing> promise;
 };
 
 
@@ -82,10 +108,37 @@ public:
     return labels;
   }
 
+  virtual Try<Nothing> masterSlaveLostHook(const SlaveInfo& slaveInfo)
+  {
+    LOG(INFO) << "Executing 'masterSlaveLostHook' in slave '"
+              << slaveInfo.id() << "'";
+
+    // TODO(nnielsen): Add argument to signal(), so we can filter messages from
+    // the `masterSlaveLostHook` from `slaveRemoveExecutorHook`.
+    // NOTE: Will not be a problem **as long as** the test doesn't start any
+    // tasks.
+    HookProcess hookProcess;
+    process::spawn(&hookProcess);
+    Future<Nothing> future =
+      process::dispatch(hookProcess, &HookProcess::await);
+
+    process::dispatch(hookProcess, &HookProcess::signal);
+
+    // Make sure we don't terminate the process before the message self-send has
+    // completed.
+    future.await();
+
+    process::terminate(hookProcess);
+    process::wait(hookProcess);
+
+    return Nothing();
+  }
+
   // TODO(nnielsen): Split hook tests into multiple modules to avoid
   // interference.
   virtual Result<Labels> slaveRunTaskLabelDecorator(
       const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
       const FrameworkInfo& frameworkInfo,
       const SlaveInfo& slaveInfo)
   {
@@ -129,6 +182,22 @@ public:
   }
 
 
+  virtual Try<Nothing> slavePreLaunchDockerHook(
+      const ContainerInfo& containerInfo,
+      const CommandInfo& commandInfo,
+      const Option<TaskInfo>& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const string& name,
+      const string& sandboxDirectory,
+      const string& mappedDirectory,
+      const Option<Resources>& resources,
+      const Option<map<string, string>>& env)
+  {
+    LOG(INFO) << "Executing 'slavePreLaunchDockerHook'";
+    return os::touch(sandboxDirectory + "/foo");
+  }
+
+
   // This hook locates the file created by environment decorator hook
   // and deletes it.
   virtual Try<Nothing> slaveRemoveExecutorHook(
@@ -143,11 +212,58 @@ public:
     // indicates successful execution of this hook.
     HookProcess hookProcess;
     process::spawn(&hookProcess);
-    process::dispatch(hookProcess, &HookProcess::signal).await();
+    Future<Nothing> future =
+      process::dispatch(hookProcess, &HookProcess::await);
+
+    process::dispatch(hookProcess, &HookProcess::signal);
+
+    // Make sure we don't terminate the process before the message self-send has
+    // completed.
+    future.await();
+
     process::terminate(hookProcess);
     process::wait(hookProcess);
 
     return Nothing();
+  }
+
+
+  virtual Result<TaskStatus> slaveTaskStatusDecorator(
+      const FrameworkID& frameworkId,
+      const TaskStatus& status)
+  {
+    LOG(INFO) << "Executing 'slaveTaskStatusDecorator' hook";
+
+    Labels labels;
+
+    // Set one known label.
+    Label* newLabel = labels.add_labels();
+    newLabel->set_key("bar");
+    newLabel->set_value("qux");
+
+    // Remove label which was set by test.
+    foreach (const Label& oldLabel, status.labels().labels()) {
+      if (oldLabel.key() != "foo") {
+        labels.add_labels()->CopyFrom(oldLabel);
+      }
+    }
+
+    TaskStatus result;
+    result.mutable_labels()->CopyFrom(labels);
+
+    // Set an IP address, a network isolation group, and a known label
+    // in network info. This data is later validated by the
+    // 'HookTest.VerifySlaveTaskStatusDecorator' test.
+    NetworkInfo* networkInfo =
+      result.mutable_container_status()->add_network_infos();
+    networkInfo->set_ip_address("4.3.2.1");
+    networkInfo->add_groups("public");
+
+    Label* networkInfoLabel = networkInfo->mutable_labels()->add_labels();
+    networkInfoLabel->set_key("net_foo");
+    networkInfoLabel->set_value("net_bar");
+
+    return result;
   }
 };
 

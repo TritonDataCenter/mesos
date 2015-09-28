@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <arpa/inet.h>
 
 #include <gmock/gmock.h>
@@ -6,6 +20,7 @@
 #include <netinet/tcp.h>
 
 #include <string>
+#include <vector>
 
 #include <process/address.hpp>
 #include <process/future.hpp>
@@ -31,6 +46,7 @@ using process::http::URL;
 using process::network::Socket;
 
 using std::string;
+using std::vector;
 
 using testing::_;
 using testing::Assign;
@@ -49,6 +65,9 @@ public:
   MOCK_METHOD1(pipe, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(get, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(post, Future<http::Response>(const http::Request&));
+  MOCK_METHOD1(requestDelete, Future<http::Response>(const http::Request&));
+  MOCK_METHOD1(a, Future<http::Response>(const http::Request&));
+  MOCK_METHOD1(abc, Future<http::Response>(const http::Request&));
 
 protected:
   virtual void initialize()
@@ -58,6 +77,9 @@ protected:
     route("/pipe", None(), &HttpProcess::pipe);
     route("/get", None(), &HttpProcess::get);
     route("/post", None(), &HttpProcess::post);
+    route("/delete", None(), &HttpProcess::requestDelete);
+    route("/a", None(), &HttpProcess::a);
+    route("/a/b/c", None(), &HttpProcess::abc);
   }
 
   Future<http::Response> auth(const http::Request& request)
@@ -90,7 +112,9 @@ public:
 };
 
 
-TEST(HTTP, Auth)
+// TODO(vinod): Use AWAIT_EXPECT_RESPONSE_STATUS_EQ in the tests.
+
+TEST(HTTPTest, Auth)
 {
   Http http;
 
@@ -103,7 +127,7 @@ TEST(HTTP, Auth)
                  noAuthFuture.get().headers.get("WWW-authenticate"));
 
   // Now test passing wrong auth header.
-  hashmap<string, string> headers;
+  http::Headers headers;
   headers["Authorization"] = "Basic " + base64::encode("testuser:wrongpass");
 
   Future<http::Response> wrongAuthFuture =
@@ -125,7 +149,7 @@ TEST(HTTP, Auth)
 }
 
 
-TEST(HTTP, Endpoints)
+TEST(HTTPTest, Endpoints)
 {
   Http http;
 
@@ -181,7 +205,7 @@ TEST(HTTP, Endpoints)
 }
 
 
-TEST(HTTP, PipeEOF)
+TEST(HTTPTest, PipeEOF)
 {
   http::Pipe pipe;
   http::Pipe::Reader reader = pipe.reader();
@@ -231,7 +255,7 @@ TEST(HTTP, PipeEOF)
 }
 
 
-TEST(HTTP, PipeFailure)
+TEST(HTTPTest, PipeFailure)
 {
   http::Pipe pipe;
   http::Pipe::Reader reader = pipe.reader();
@@ -263,7 +287,7 @@ TEST(HTTP, PipeFailure)
 
 
 
-TEST(HTTP, PipeReaderCloses)
+TEST(HTTPTest, PipeReaderCloses)
 {
   http::Pipe pipe;
   http::Pipe::Reader reader = pipe.reader();
@@ -297,7 +321,7 @@ TEST(HTTP, PipeReaderCloses)
 }
 
 
-TEST(HTTP, Encode)
+TEST(HTTPTest, Encode)
 {
   string unencoded = "a$&+,/:;=?@ \"<>#%{}|\\^~[]`\x19\x80\xFF";
   unencoded += string("\x00", 1); // Add a null byte to the end.
@@ -321,7 +345,7 @@ TEST(HTTP, Encode)
 }
 
 
-TEST(HTTP, PathParse)
+TEST(HTTPTest, PathParse)
 {
   const string pattern = "/books/{isbn}/chapters/{chapter}";
 
@@ -371,10 +395,10 @@ http::Response validateGetWithoutQuery(const http::Request& request)
 {
   EXPECT_NE(process::address(), request.client);
   EXPECT_EQ("GET", request.method);
-  EXPECT_THAT(request.path, EndsWith("get"));
+  EXPECT_THAT(request.url.path, EndsWith("get"));
   EXPECT_EQ("", request.body);
-  EXPECT_EQ("", request.fragment);
-  EXPECT_TRUE(request.query.empty());
+  EXPECT_NONE(request.url.fragment);
+  EXPECT_TRUE(request.url.query.empty());
 
   return http::OK();
 }
@@ -384,17 +408,17 @@ http::Response validateGetWithQuery(const http::Request& request)
 {
   EXPECT_NE(process::address(), request.client);
   EXPECT_EQ("GET", request.method);
-  EXPECT_THAT(request.path, EndsWith("get"));
+  EXPECT_THAT(request.url.path, EndsWith("get"));
   EXPECT_EQ("", request.body);
-  EXPECT_EQ("", request.fragment);
-  EXPECT_EQ("bar", request.query.at("foo"));
-  EXPECT_EQ(1, request.query.size());
+  EXPECT_NONE(request.url.fragment);
+  EXPECT_EQ("bar", request.url.query.at("foo"));
+  EXPECT_EQ(1, request.url.query.size());
 
   return http::OK();
 }
 
 
-TEST(HTTP, Get)
+TEST(HTTPTest, Get)
 {
   Http http;
 
@@ -417,7 +441,32 @@ TEST(HTTP, Get)
 }
 
 
-TEST(HTTP, StreamingGetComplete)
+TEST(HTTPTest, NestedGet)
+{
+  Http http;
+
+  EXPECT_CALL(*http.process, a(_))
+    .WillOnce(Return(http::Accepted()));
+
+  EXPECT_CALL(*http.process, abc(_))
+    .WillOnce(Return(http::OK()));
+
+  // The handler for "/a/b/c" should return 'http::OK()'.
+  Future<http::Response> response = http::get(http.process->self(), "/a/b/c");
+
+  AWAIT_READY(response);
+  ASSERT_EQ(http::statuses[200], response.get().status);
+
+  // "/a/b" should be handled by "/a" handler and return
+  // 'http::Accepted()'.
+  response = http::get(http.process->self(), "/a/b");
+
+  AWAIT_READY(response);
+  ASSERT_EQ(http::statuses[202], response.get().status);
+}
+
+
+TEST(HTTPTest, StreamingGetComplete)
 {
   Http http;
 
@@ -459,7 +508,7 @@ TEST(HTTP, StreamingGetComplete)
 }
 
 
-TEST(HTTP, StreamingGetFailure)
+TEST(HTTPTest, StreamingGetFailure)
 {
   Http http;
 
@@ -501,19 +550,39 @@ TEST(HTTP, StreamingGetFailure)
 }
 
 
+TEST(HTTPTest, PipeEquality)
+{
+  // Pipes are shared objects, like Futures. Copies are considered
+  // equal as they point to the same underlying object.
+  http::Pipe pipe1;
+  http::Pipe copy = pipe1;
+
+  EXPECT_EQ(pipe1, copy);
+
+  http::Pipe pipe2;
+  EXPECT_NE(pipe2, pipe1);
+
+  EXPECT_EQ(pipe1.reader(), pipe1.reader());
+  EXPECT_EQ(pipe1.writer(), pipe1.writer());
+
+  EXPECT_NE(pipe1.reader(), pipe2.reader());
+  EXPECT_NE(pipe1.writer(), pipe2.writer());
+}
+
+
 http::Response validatePost(const http::Request& request)
 {
   EXPECT_EQ("POST", request.method);
-  EXPECT_THAT(request.path, EndsWith("post"));
+  EXPECT_THAT(request.url.path, EndsWith("post"));
   EXPECT_EQ("This is the payload.", request.body);
-  EXPECT_EQ("", request.fragment);
-  EXPECT_TRUE(request.query.empty());
+  EXPECT_NONE(request.url.fragment);
+  EXPECT_TRUE(request.url.query.empty());
 
   return http::OK();
 }
 
 
-TEST(HTTP, Post)
+TEST(HTTPTest, Post)
 {
   Http http;
 
@@ -537,7 +606,7 @@ TEST(HTTP, Post)
   ASSERT_EQ(http::statuses[200], future.get().status);
 
   // Now test passing headers instead.
-  hashmap<string, string> headers;
+  http::Headers headers;
   headers["Content-Type"] = "text/plain";
 
   EXPECT_CALL(*http.process, post(_))
@@ -551,7 +620,33 @@ TEST(HTTP, Post)
 }
 
 
-TEST(HTTP, QueryEncodeDecode)
+http::Response validateDelete(const http::Request& request)
+{
+  EXPECT_EQ("DELETE", request.method);
+  EXPECT_THAT(request.url.path, EndsWith("delete"));
+  EXPECT_TRUE(request.body.empty());
+  EXPECT_TRUE(request.url.query.empty());
+
+  return http::OK();
+}
+
+
+TEST(HTTPTest, Delete)
+{
+  Http http;
+
+  EXPECT_CALL(*http.process, requestDelete(_))
+    .WillOnce(Invoke(validateDelete));
+
+  Future<http::Response> future =
+    http::requestDelete(http.process->self(), "delete", None());
+
+  AWAIT_READY(future);
+  ASSERT_EQ(http::statuses[200], future.get().status);
+}
+
+
+TEST(HTTPTest, QueryEncodeDecode)
 {
   // If we use Type<a, b> directly inside a macro without surrounding
   // parenthesis the comma will be eaten by the macro rather than the
@@ -592,7 +687,7 @@ TEST(HTTP, QueryEncodeDecode)
 }
 
 
-TEST(HTTP, CaseInsensitiveHeaders)
+TEST(HTTPTest, CaseInsensitiveHeaders)
 {
   http::Request request;
   request.headers["Content-Length"] = "20";
@@ -618,6 +713,62 @@ TEST(HTTP, CaseInsensitiveHeaders)
 }
 
 
+TEST(HTTPTest, Accepts)
+{
+  // Create requests that do not accept the 'text/*' media type.
+  vector<string> headers = {
+    "text/*;q=0.0",
+    "text/html;q=0.0",
+    "text/",
+    "text",
+    "foo/*",
+    "foo/*, text/*;q=0.0",
+    "foo/*,\ttext/*;q=0.0",
+    "*/*, text/*;q=0.0",
+    "*/*;q=0.0, foo",
+    "textttt/*"
+  };
+
+  foreach (const string& accept, headers) {
+    http::Request request;
+    request.headers["Accept"] = accept;
+
+    EXPECT_FALSE(request.acceptsMediaType("text/*"))
+      << "Not expecting " << accept << " to match 'text/*'";
+
+    EXPECT_FALSE(request.acceptsMediaType("text/html"))
+      << "Not expecting " << accept << " to match 'text/html'";
+  }
+
+  // Create requests that accept 'text/html' media type.
+  headers = {
+    "text/*",
+    "text/*;q=0.1",
+    "text/html",
+    "text/html;q=0.1",
+    "text/bar, text/html,q=0.1",
+    "*/*, text/bar;q=0.5",
+    "*/*;q=0.9, text/foo",
+    "text/foo,\ttext/*;q=0.1",
+    "*/*",
+    "*/*, text/bar",
+    "*/*, foo/*"
+  };
+
+  foreach (const string& accept, headers) {
+    http::Request request;
+    request.headers["Accept"] = accept;
+
+    EXPECT_TRUE(request.acceptsMediaType("text/html"))
+      << "Expecting '" << accept << "' to match 'text/html'";
+  }
+
+  // Missing header should accept all media types.
+  http::Request empty;
+  EXPECT_TRUE(empty.acceptsMediaType("text/html"));
+}
+
+
 // TODO(evelinad): Add URLTest for IPv6.
 TEST(URLTest, Stringification)
 {
@@ -640,15 +791,27 @@ TEST(URLTest, Stringification)
   query["foo"] = "bar";
   query["baz"] = "bam";
 
-  EXPECT_EQ("http://172.158.1.23:80/?baz=bam&foo=bar",
-            stringify(URL("http", ip.get(), 80, "/", query)));
+  // The order of the hashmap entries may vary, hence we have
+  // to check if one of the possible outcomes is satisfied.
+  const string url1 = stringify(URL("http", ip.get(), 80, "/", query));
 
-  EXPECT_EQ("http://172.158.1.23:80/path?baz=bam&foo=bar",
-            stringify(URL("http", ip.get(), 80, "/path", query)));
+  EXPECT_TRUE(url1 == "http://172.158.1.23:80/?baz=bam&foo=bar" ||
+              url1 == "http://172.158.1.23:80/?foo=bar&baz=bam");
 
-  EXPECT_EQ("http://172.158.1.23:80/?baz=bam&foo=bar#fragment",
-            stringify(URL("http", ip.get(), 80, "/", query, "fragment")));
+  const string url2 = stringify(URL("http", ip.get(), 80, "/path", query));
 
-  EXPECT_EQ("http://172.158.1.23:80/path?baz=bam&foo=bar#fragment",
-            stringify(URL("http", ip.get(), 80, "/path", query, "fragment")));
+  EXPECT_TRUE(url2 == "http://172.158.1.23:80/path?baz=bam&foo=bar" ||
+              url2 == "http://172.158.1.23:80/path?foo=bar&baz=bam");
+
+  const string url3 =
+    stringify(URL("http", ip.get(), 80, "/", query, "fragment"));
+
+  EXPECT_TRUE(url3 == "http://172.158.1.23:80/?baz=bam&foo=bar#fragment" ||
+              url3 == "http://172.158.1.23:80/?foo=bar&baz=bam#fragment");
+
+  const string url4 =
+    stringify(URL("http", ip.get(), 80, "/path", query, "fragment"));
+
+  EXPECT_TRUE(url4 == "http://172.158.1.23:80/path?baz=bam&foo=bar#fragment" ||
+              url4 == "http://172.158.1.23:80/path?foo=bar&baz=bam#fragment");
 }

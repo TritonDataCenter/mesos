@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_NETWORK_HPP__
 #define __PROCESS_NETWORK_HPP__
 
@@ -9,9 +23,12 @@
 namespace process {
 namespace network {
 
-// Returns a socket file descriptor for the specified options. Note
-// that on OS X, the returned socket will have the SO_NOSIGPIPE option
-// set.
+/**
+ * Returns a socket file descriptor for the specified options.
+ *
+ * **NOTE:** on OS X, the returned socket will have the SO_NOSIGPIPE
+ * option set.
+ */
 inline Try<int> socket(int family, int type, int protocol)
 {
   int s;
@@ -77,15 +94,18 @@ inline Try<int> connect(int s, const Address& address)
 }
 
 
-// Returns the Address with the assigned ip and assigned port.
-// Returns an error if the getsockname system call fails or the
-// family type is not supported.
+/**
+ * Returns the `Address` with the assigned ip and assigned port.
+ *
+ * @return An `Address` or an error if the `getsockname` system call
+ *     fails or the family type is not supported.
+ */
 inline Try<Address> address(int s)
 {
   struct sockaddr_storage storage;
   socklen_t storagelen = sizeof(storage);
 
-  if(::getsockname(s, (struct sockaddr*) &storage, &storagelen) < 0) {
+  if (::getsockname(s, (struct sockaddr*) &storage, &storagelen) < 0) {
     return ErrnoError("Failed to getsockname");
   }
 
@@ -93,15 +113,18 @@ inline Try<Address> address(int s)
 }
 
 
-// Returns the peer's Address for the accepted or connected socket.
-// Returns an error if the getpeername system call fails or the
-// family type is not supported.
+/**
+ * Returns the peer's `Address` for the accepted or connected socket.
+ *
+ * @return An `Address` or an error if the `getpeername` system call
+ *     fails or the family type is not supported.
+ */
 inline Try<Address> peer(int s)
 {
   struct sockaddr_storage storage;
   socklen_t storagelen = sizeof(storage);
 
-  if(::getpeername(s, (struct sockaddr*) &storage, &storagelen) < 0) {
+  if (::getpeername(s, (struct sockaddr*) &storage, &storagelen) < 0) {
     return ErrnoError("Failed to getpeername");
   }
 

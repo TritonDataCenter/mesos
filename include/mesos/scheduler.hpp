@@ -19,17 +19,11 @@
 #ifndef __MESOS_SCHEDULER_HPP__
 #define __MESOS_SCHEDULER_HPP__
 
-#include <pthread.h>
-
-#include <functional>
-#include <queue>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <mesos/mesos.hpp>
-
-#include <mesos/scheduler/scheduler.hpp>
-
 
 // Mesos scheduler interface and scheduler driver. A scheduler is used
 // to interact with Mesos in order run distributed computations.
@@ -37,6 +31,11 @@
 // IF YOU FIND YOURSELF MODIFYING COMMENTS HERE PLEASE CONSIDER MAKING
 // THE SAME MODIFICATIONS FOR OTHER LANGUAGE BINDINGS (e.g., Java:
 // src/java/src/org/apache/mesos, Python: src/python/src, etc.).
+
+// Forward declaration.
+namespace process {
+class Latch;
+} // namespace process {
 
 namespace mesos {
 
@@ -111,7 +110,7 @@ public:
   // Invoked when an offer is no longer valid (e.g., the slave was
   // lost or another framework used resources in the offer). If for
   // whatever reason an offer is never rescinded (e.g., dropped
-  // message, failing over framework, etc.), a framwork that attempts
+  // message, failing over framework, etc.), a framework that attempts
   // to launch tasks using an invalid offer will receive TASK_LOST
   // status updates for those tasks (see Scheduler::resourceOffers).
   virtual void offerRescinded(
@@ -269,6 +268,10 @@ public:
   // those filtered slaves.
   virtual Status reviveOffers() = 0;
 
+  // Inform Mesos master to stop sending offers to the framework. The
+  // scheduler should call reviveOffers() to resume getting offers.
+  virtual Status suppressOffers() = 0;
+
   // Acknowledges the status update. This should only be called
   // once the status update is processed durably by the scheduler.
   // Not that explicit acknowledgements must be requested via the
@@ -417,6 +420,8 @@ public:
 
   virtual Status reviveOffers();
 
+  virtual Status suppressOffers();
+
   virtual Status acknowledgeStatusUpdate(
       const TaskStatus& status);
 
@@ -445,11 +450,11 @@ private:
   // URL for the master (e.g., zk://, file://, etc).
   std::string url;
 
-  // Mutex to enforce all non-callbacks are executed serially.
-  pthread_mutex_t mutex;
+  // Mutex for enforcing serial execution of all non-callbacks.
+  std::recursive_mutex mutex;
 
-  // Condition variable for waiting until driver terminates.
-  pthread_cond_t cond;
+  // Latch for waiting until driver terminates.
+  process::Latch* latch;
 
   // Current status of the driver.
   Status status;
@@ -462,54 +467,6 @@ private:
   std::string schedulerId;
 };
 
-
-namespace scheduler {
-
-// Interface to Mesos for a scheduler. Abstracts master detection
-// (connection and disconnection) and authentication if some
-// credentials are provided.
-//
-// Expects three callbacks, 'connected', 'disconnected', and
-// 'received' which will get invoked _serially_ when it's determined
-// that we've connected, disconnected, or received events from the
-// master. Note that we drop events while disconnected but it's
-// possible to receive a batch of events across a
-// disconnected/connected transition before getting the disconnected
-// and then connected callback.
-//
-// TODO(benh): Don't include events in 'received' that occured after a
-// disconnected/connected transition.
-class Mesos
-{
-public:
-  Mesos(const std::string& master,
-        const std::function<void(void)>& connected,
-        const std::function<void(void)>& disconnected,
-        const std::function<void(const std::queue<Event>&)>& received);
-
-  // Same as the above constructor but takes 'credential' as argument.
-  // The credential will be used for authenticating with the master.
-  Mesos(const std::string& master,
-        const Credential& credential,
-        const std::function<void(void)>& connected,
-        const std::function<void(void)>& disconnected,
-        const std::function<void(const std::queue<Event>&)>& received);
-
-  virtual ~Mesos();
-
-  // Attempts to send a call to the master.
-  //
-  // Some local validation of calls is performed which may generate
-  // events without ever being sent to the master. This includes when
-  // calls are sent but no master is currently detected (i.e., we're
-  // disconnected).
-  virtual void send(const Call& call);
-
-private:
-  MesosProcess* process;
-};
-
-} // namespace scheduler {
 } // namespace mesos {
 
 #endif // __MESOS_SCHEDULER_HPP__

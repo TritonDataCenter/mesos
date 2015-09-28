@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <glog/logging.h>
 
 #include <list>
@@ -233,14 +247,15 @@ Timer Clock::timer(
     const Duration& duration,
     const lambda::function<void(void)>& thunk)
 {
-  static uint64_t id = 1; // Start at 1 since Timer() instances use id 0.
+  // Start at 1 since Timer() instances use id 0.
+  static std::atomic<uint64_t> id(1);
 
   // Assumes Clock::now() does Clock::now(__process__).
   Timeout timeout = Timeout::in(duration);
 
   UPID pid = __process__ != NULL ? __process__->self() : UPID();
 
-  Timer timer(__sync_fetch_and_add(&id, 1), timeout, pid, thunk);
+  Timer timer(id.fetch_add(1), timeout, pid, thunk);
 
   VLOG(3) << "Created a timer for " << pid << " in " << stringify(duration)
           << " in the future (" << timeout.time() << ")";

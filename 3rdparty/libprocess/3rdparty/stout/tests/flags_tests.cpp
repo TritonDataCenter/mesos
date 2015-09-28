@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <map>
 #include <string>
 
@@ -18,7 +32,9 @@
 
 #include <stout/tests/utils.hpp>
 
-using namespace flags;
+using flags::Flag;
+using flags::Flags;
+using flags::FlagsBase;
 
 using std::cout;
 using std::endl;
@@ -387,9 +403,10 @@ TEST(FlagsTest, DuplicatesFromEnvironment)
   };
 
   Try<Nothing> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
-  EXPECT_ERROR(load);
+  EXPECT_SOME(load);
 
-  EXPECT_EQ("Duplicate flag 'name1' on command line", load.error());
+  // The environment variables are overwritten by command line flags.
+  EXPECT_EQ(flags.name1, "billy joel");
 
   os::unsetenv("FLAGSTEST_name1");
 }
@@ -405,10 +422,10 @@ TEST(FlagsTest, DuplicatesFromCommandLine)
     "--name1=ben folds"
   };
 
+  // TODO(klaus1982): Simply checking for the error. Once typed errors are
+  // introduced, capture it within the type system.
   Try<Nothing> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_ERROR(load);
-
-  EXPECT_EQ("Duplicate flag 'name1' on command line", load.error());
 }
 
 

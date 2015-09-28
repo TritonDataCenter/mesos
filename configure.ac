@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [0.24.0])
+AC_INIT([mesos], [0.26.0])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -34,6 +34,7 @@ AC_CONFIG_MACRO_DIR([m4])
 # -Wno-portability, since we require GNU Make for % patterns
 # Removal of -Werror due warnings introduced by automake 1.14.
 AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign])
+AM_MAINTAINER_MODE([enable])
 
 # This is required for linking non-POSIX libs.
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
@@ -71,7 +72,6 @@ AC_CONFIG_COMMANDS_POST([ac_configure_args="$ac_configure_args_post"])
 AC_CONFIG_SUBDIRS([3rdparty/libprocess])
 
 AC_CONFIG_FILES([Makefile mesos.pc])
-AC_CONFIG_FILES([ec2/Makefile])
 AC_CONFIG_FILES([src/Makefile])
 AC_CONFIG_FILES([3rdparty/Makefile])
 
@@ -256,6 +256,12 @@ AC_ARG_ENABLE([ssl],
                              [use ssl for libprocess communication
                              default: no]),
               [enable_ssl=yes], [])
+
+AC_ARG_ENABLE([static-unimplemented],
+              AS_HELP_STRING([--enable-static-unimplemented],
+                             [generate static assertion errors for unimplemented
+                             functions default: no]),
+              [enable_static_unimplemented=yes], [])
 
 AC_ARG_WITH([libevent],
             AS_HELP_STRING([--with-libevent=@<:@=DIR@:>@],
@@ -483,71 +489,17 @@ AM_CONDITIONAL([WITH_BUNDLED_ZOOKEEPER],
                [test "x$with_bundled_zookeeper" = "xyes"])
 
 
-# Check if user has asked us to use a preinstalled protobuf, or if
-# they asked us to ignore all bundled libraries while compiling and
-# linking.
-if test "x$without_bundled_protobuf" = "xyes" || \
-   test "x$enable_bundled" != "xyes"; then
-  # Use the system default prefix if not specified.
-  if test -n "`echo $with_protobuf`"; then
-    PROTOBUFPREFIX="${with_protobuf}"
-  elif test "x$enable_bundled" != "xyes"; then
-    PROTOBUFPREFIX="/usr"
-  fi
-
-  # Check for protobuf.
-  # TODO(jieyu): Symbol _init is not available for libs on OS X.
-  # Consider checking lib using AX_CXX_CHECK_LIB.
-  AC_CHECK_HEADERS([google/protobuf/message.h],
-                   [AC_CHECK_LIB([protobuf],
-                                 [_init],
-                                 [found_protobuf=yes])])
-
-  if test "x$found_protobuf" = "xyes"; then
-    with_bundled_protobuf=no
-    if test -z "`echo $PROTOBUF_JAR`"; then
-      PROTOBUF_JAR="${PROTOBUFPREFIX}/share/java/protobuf.jar"
-    fi
-
-    AC_CHECK_FILE([$PROTOBUF_JAR],
-                  [],
-                  [AC_MSG_ERROR([cannot find PROTOBUF_JAR=$PROTOBUF_JAR])])
-
-    AC_CHECK_TOOL([PROTOCOMPILER_TEST], [protoc], [], [$PROTOBUFPREFIX/bin])
-
-    if test -z "`echo $PROTOCOMPILER_TEST`"; then
-      AC_MSG_ERROR([protoc not found in PATH])
-    fi
-
-    PROTOCOMPILER="$PROTOBUFPREFIX/bin/protoc"
-
-    if test "x$enable_python" = "xyes"; then
-      AC_PYTHON_MODULE([google.protobuf], [yes])
-    fi
-
-  else
-    AC_MSG_ERROR([cannot find protobuf
--------------------------------------------------------------------
-You have requested the use of a non-bundled protobuf but no suitable
-protobuf could be found.
-
-You may want specify the location of protobuf by providing a prefix
-path via --with-protobuf=DIR, or check that the path you provided is
-correct if youre already doing this.
--------------------------------------------------------------------
-])
-  fi
+# Check if gflags are present. If so, make sure we link against them
+# when building the Python module.
+AC_CHECK_LIB([gflags],
+             [main],
+             [found_gflags=yes])
+if test "x$found_gflags" = "xyes"; then
+  GFLAGS_LIBS="-lgflags"
 else
-  with_bundled_protobuf=yes
-  PROTOBUF_JAR="\${MESOS_BUILD_DIR}/src/java/target/protobuf-java-2.5.0.jar"
+  GFLAGS_LIBS=""
 fi
 
-
-AM_CONDITIONAL([WITH_BUNDLED_PROTOBUF],
-               [test "x$with_bundled_protobuf" = "xyes"])
-
-AC_SUBST([PROTOBUF_JAR])
-AC_SUBST([PROTOCOMPILER])
 
 AS_CASE($ax_cv_cxx_compiler_vendor,
   [clang], [
@@ -651,9 +603,7 @@ case "$host_os" in
     fi
 
     # GTEST on OSX needs its own tr1 tuple.
-    # TODO(dhamon): Update to gmock 1.7 and pass GTEST_LANG_CXX11 when
-    # in C++11 mode.
-    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1"
+    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1 -DGTEST_LANG_CXX11"
     ;;
 esac
 
@@ -832,7 +782,7 @@ __EOF__
 # distcheck failure on OSX by leaking build artefacts (.dsym).
 AS_IF([test "x${ac_cv_env_CFLAGS_set}" = "x"],
       [SASL_TEST_CFLAGS=""], [SASL_TEST_CFLAGS=$CFLAGS])
-$CC crammd5_installed.c $CPPFLAGS $SASL_TEST_CFLAGS $LDFLAGS -lsasl2  \
+$CC crammd5_installed.c $CPPFLAGS $SASL_TEST_CFLAGS $LDFLAGS -lsasl2 $LIBS \
   -o crammd5_installed 2>&1 >/dev/null
 
 # Run the test binary and get its output.
@@ -1311,6 +1261,7 @@ There are two possible workarounds for this issue:
   AC_CONFIG_FILES([src/examples/python/test-containerizer],
                   [chmod +x src/examples/python/test-containerizer])
   AC_CONFIG_FILES([src/python/setup.py])
+  AC_CONFIG_FILES([src/python/cli/setup.py])
   AC_CONFIG_FILES([src/python/interface/setup.py])
   AC_CONFIG_FILES([src/python/native/ext_modules.py])
   AC_CONFIG_FILES([src/python/native/setup.py])
@@ -1320,7 +1271,7 @@ There are two possible workarounds for this issue:
   # TODO(tillt): Remove this once Apple distributed an updated Python.
   PYTHON_CPPFLAGS="$CPPFLAGS"
   PYTHON_CFLAGS="$CFLAGS $CXXFLAGS" # distutils requires we embed CXXFLAGS.
-  PYTHON_LDFLAGS="$LDFLAGS"
+  PYTHON_LDFLAGS="$LDFLAGS $GFLAGS_LIBS"
 
   AS_IF([test "x$ax_cv_cxx_compiler_vendor" = "xclang"],
 	[PYTHON_CPPFLAGS="$PYTHON_CPPFLAGS -Qunused-arguments"
@@ -1443,6 +1394,74 @@ AM_CONDITIONAL([WITHOUT_PYTHON_DEPS],
 AM_CONDITIONAL([GIT_REPO], [test -d ${srcdir}"/.git"])
 
 
+# Check if user has asked us to use a preinstalled protobuf, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
+if test "x$without_bundled_protobuf" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Use the system default prefix if not specified.
+  if test -n "`echo $with_protobuf`"; then
+    PROTOBUFPREFIX="${with_protobuf}"
+  elif test "x$enable_bundled" != "xyes"; then
+    PROTOBUFPREFIX="/usr"
+  fi
+
+  # Check for protobuf.
+  # TODO(jieyu): Symbol _init is not available for libs on OS X.
+  # Consider checking lib using AX_CXX_CHECK_LIB.
+  AC_CHECK_HEADERS([google/protobuf/message.h],
+                   [AC_CHECK_LIB([protobuf],
+                                 [_init],
+                                 [found_protobuf=yes])])
+
+  if test "x$found_protobuf" = "xyes"; then
+    with_bundled_protobuf=no
+    if test -z "`echo $PROTOBUF_JAR`"; then
+      PROTOBUF_JAR="${PROTOBUFPREFIX}/share/java/protobuf.jar"
+    fi
+
+    if test "x$enable_java" = "xyes"; then
+      AC_CHECK_FILE([$PROTOBUF_JAR],
+                    [],
+                    [AC_MSG_ERROR([cannot find PROTOBUF_JAR=$PROTOBUF_JAR])])
+    fi
+
+    AC_CHECK_TOOL([PROTOCOMPILER_TEST], [protoc], [], [$PROTOBUFPREFIX/bin])
+
+    if test -z "`echo $PROTOCOMPILER_TEST`"; then
+      AC_MSG_ERROR([protoc not found in PATH])
+    fi
+
+    PROTOCOMPILER="$PROTOBUFPREFIX/bin/protoc"
+
+    if test "x$enable_python" = "xyes"; then
+      AC_PYTHON_MODULE([google.protobuf], [yes])
+    fi
+
+  else
+    AC_MSG_ERROR([cannot find protobuf
+-------------------------------------------------------------------
+You have requested the use of a non-bundled protobuf but no suitable
+protobuf could be found.
+
+You may want specify the location of protobuf by providing a prefix
+path via --with-protobuf=DIR, or check that the path you provided is
+correct if youre already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_protobuf=yes
+  PROTOBUF_JAR="\${MESOS_BUILD_DIR}/src/java/target/protobuf-java-2.5.0.jar"
+fi
+
+
+AM_CONDITIONAL([WITH_BUNDLED_PROTOBUF],
+               [test "x$with_bundled_protobuf" = "xyes"])
+
+AC_SUBST([PROTOBUF_JAR])
+AC_SUBST([PROTOCOMPILER])
+
 # Check if libevent prefix path was provided, and if so, add it to
 # the CPPFLAGS and LDFLAGS with respective /include and /lib path
 # suffixes.
@@ -1552,6 +1571,10 @@ libevent_openssl is required for an SSL-enabled build.
 fi
 
 AM_CONDITIONAL([ENABLE_SSL], [test x"$enable_ssl" = "xyes"])
+
+if test "x$enable_static_unimplemented" = "xyes"; then
+  AC_DEFINE([ENABLE_STATIC_UNIMPLEMENTED], [1])
+fi
 
 
 # Provide more granular version numbers based on the version string,

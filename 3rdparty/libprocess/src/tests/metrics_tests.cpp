@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <gtest/gtest.h>
 
 #include <map>
@@ -52,7 +66,7 @@ public:
 };
 
 
-TEST(Metrics, Counter)
+TEST(MetricsTest, Counter)
 {
   Counter counter("test/counter");
 
@@ -78,7 +92,7 @@ TEST(Metrics, Counter)
 }
 
 
-TEST(Metrics, Gauge)
+TEST(MetricsTest, Gauge)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -109,7 +123,7 @@ TEST(Metrics, Gauge)
 }
 
 
-TEST(Metrics, Statistics)
+TEST(MetricsTest, Statistics)
 {
   Counter counter("test/counter", process::TIME_SERIES_WINDOW);
 
@@ -143,7 +157,7 @@ TEST(Metrics, Statistics)
 }
 
 
-TEST(Metrics, Snapshot)
+TEST(MetricsTest, Snapshot)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -179,10 +193,10 @@ TEST(Metrics, Snapshot)
   map<string, JSON::Value> values = responseJSON.get().values;
 
   EXPECT_EQ(1u, values.count("test/counter"));
-  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().value);
+  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(1u, values.count("test/gauge"));
-  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().value);
+  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
 
@@ -215,7 +229,7 @@ TEST(Metrics, Snapshot)
 }
 
 
-TEST(Metrics, SnapshotTimeout)
+TEST(MetricsTest, SnapshotTimeout)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -276,10 +290,10 @@ TEST(Metrics, SnapshotTimeout)
   map<string, JSON::Value> values = responseJSON.get().values;
 
   EXPECT_EQ(1u, values.count("test/counter"));
-  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().value);
+  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(1u, values.count("test/gauge"));
-  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().value);
+  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
   EXPECT_EQ(0u, values.count("test/gauge_timeout"));
@@ -318,7 +332,7 @@ TEST(Metrics, SnapshotTimeout)
 
 
 // Ensures that the aggregate statistics are correct in the snapshot.
-TEST(Metrics, SnapshotStatistics)
+TEST(MetricsTest, SnapshotStatistics)
 {
   UPID upid("metrics", process::address());
 
@@ -367,7 +381,9 @@ TEST(Metrics, SnapshotStatistics)
                const JSON::Value& value,
                responseJSON.get().values) {
     if (value.is<JSON::Number>()) {
-      responseValues[key] = value.as<JSON::Number>().value;
+      // "test/counter/count" is an integer, everything else is a double.
+      JSON::Number number = value.as<JSON::Number>();
+      responseValues[key] = number.as<double>();
     }
   }
 
@@ -381,7 +397,7 @@ TEST(Metrics, SnapshotStatistics)
 }
 
 
-TEST(Metrics, Timer)
+TEST(MetricsTest, Timer)
 {
   metrics::Timer<Nanoseconds> timer("test/timer");
   EXPECT_EQ("test/timer_ns", timer.name());
@@ -415,7 +431,7 @@ static Future<int> advanceAndReturn()
 }
 
 
-TEST(Metrics, AsyncTimer)
+TEST(MetricsTest, AsyncTimer)
 {
   metrics::Timer<Microseconds> t("test/timer");
   EXPECT_EQ("test/timer_us", t.name());

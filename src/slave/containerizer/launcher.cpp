@@ -36,7 +36,7 @@ using std::map;
 using std::string;
 using std::vector;
 
-using mesos::slave::ExecutorRunState;
+using mesos::slave::ContainerState;
 
 namespace mesos {
 namespace internal {
@@ -50,11 +50,11 @@ Try<Launcher*> PosixLauncher::create(const Flags& flags)
 
 
 Future<hashset<ContainerID>> PosixLauncher::recover(
-    const list<ExecutorRunState>& states)
+    const list<ContainerState>& states)
 {
-  foreach (const ExecutorRunState& state, states) {
-    const ContainerID& containerId = state.id;
-    pid_t pid = state.pid;
+  foreach (const ContainerState& state, states) {
+    const ContainerID& containerId = state.container_id();
+    pid_t pid = state.pid();
 
     if (pids.containsValue(pid)) {
       // This should (almost) never occur. There is the possibility
@@ -107,7 +107,8 @@ Try<pid_t> PosixLauncher::fork(
     const Subprocess::IO& err,
     const Option<flags::FlagsBase>& flags,
     const Option<map<string, string>>& environment,
-    const Option<lambda::function<int()>>& setup)
+    const Option<lambda::function<int()>>& setup,
+    const Option<int>& namespaces)
 {
   if (pids.contains(containerId)) {
     return Error("Process has already been forked for container " +

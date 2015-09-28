@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_REFERENCE_HPP__
 #define __PROCESS_REFERENCE_HPP__
 
@@ -21,7 +35,7 @@ public:
     copy(that);
   }
 
-  ProcessReference& operator = (const ProcessReference& that)
+  ProcessReference& operator=(const ProcessReference& that)
   {
     if (this != &that) {
       cleanup();
@@ -30,17 +44,17 @@ public:
     return *this;
   }
 
-  ProcessBase* operator -> ()
+  ProcessBase* operator->()
   {
     return process;
   }
 
-  operator ProcessBase* ()
+  operator ProcessBase*()
   {
     return process;
   }
 
-  operator bool () const
+  operator bool() const
   {
     return process != NULL;
   }
@@ -52,7 +66,7 @@ private:
     : process(_process)
   {
     if (process != NULL) {
-      __sync_fetch_and_add(&(process->refs), 1);
+      process->refs.fetch_add(1);
     }
   }
 
@@ -64,15 +78,15 @@ private:
       // There should be at least one reference to the process, so
       // we don't need to worry about checking if it's exiting or
       // not, since we know we can always create another reference.
-      CHECK(process->refs > 0);
-      __sync_fetch_and_add(&(process->refs), 1);
+      CHECK(process->refs.load() > 0);
+      process->refs.fetch_add(1);
     }
   }
 
   void cleanup()
   {
     if (process != NULL) {
-      __sync_fetch_and_sub(&(process->refs), 1);
+      process->refs.fetch_sub(1);
     }
   }
 

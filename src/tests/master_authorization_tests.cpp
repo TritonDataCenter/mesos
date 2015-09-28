@@ -85,8 +85,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   ASSERT_SOME(master);
 
   // Create an authorized executor.
-  ExecutorInfo executor; // Bug in gcc 4.1.*, must assign on next line.
-  executor = CREATE_EXECUTOR_INFO("test-executor", "exit 1");
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO("test-executor", "exit 1");
   executor.mutable_command()->set_user("foo");
 
   MockExecutor exec(executor.executor_id());
@@ -119,9 +118,6 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(executor);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   EXPECT_CALL(exec, registered(_, _, _, _))
     .Times(1);
 
@@ -132,7 +128,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
@@ -163,8 +159,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
   ASSERT_SOME(master);
 
   // Create an unauthorized executor.
-  ExecutorInfo executor; // Bug in gcc 4.1.*, must assign on next line.
-  executor = CREATE_EXECUTOR_INFO("test-executor", "exit 1");
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO("test-executor", "exit 1");
   executor.mutable_command()->set_user("foo");
 
   MockExecutor exec(executor.executor_id());
@@ -197,14 +192,11 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(executor);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_ERROR, status.get().state());
@@ -248,8 +240,6 @@ TEST_F(MasterAuthorizationTest, KillTask)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
@@ -258,7 +248,7 @@ TEST_F(MasterAuthorizationTest, KillTask)
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait until authorization is in progress.
   AWAIT_READY(authorize);
@@ -322,8 +312,6 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
@@ -332,7 +320,7 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait until authorization is in progress.
   AWAIT_READY(authorize);
@@ -412,8 +400,6 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
@@ -422,7 +408,7 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait until authorization is in progress.
   AWAIT_READY(authorize);
@@ -506,8 +492,6 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
@@ -516,7 +500,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait until authorization is in progress.
   AWAIT_READY(authorize);
@@ -586,9 +570,6 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   TaskInfo task1 = createTask(
       offers1.get()[0], executor1.command().value(), executor1.executor_id());
 
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1);
-
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
@@ -596,7 +577,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
-  driver.launchTasks(offers1.get()[0].id(), tasks1);
+  driver.launchTasks(offers1.get()[0].id(), {task1});
 
   // Wait until authorization is in progress.
   AWAIT_READY(authorize);
@@ -624,9 +605,6 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   TaskInfo task2 = createTask(
       offers2.get()[0], executor2.command().value(), executor2.executor_id());
 
-  vector<TaskInfo> tasks2;
-  tasks2.push_back(task2);
-
   EXPECT_CALL(exec2, registered(_, _, _, _))
     .Times(1);
 
@@ -640,7 +618,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
     .WillOnce(Return(true));
 
-  driver.launchTasks(offers2.get()[0].id(), tasks2);
+  driver.launchTasks(offers2.get()[0].id(), {task2});
 
   AWAIT_READY(status2);
   ASSERT_EQ(TASK_RUNNING, status2.get().state());
@@ -692,8 +670,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedRole)
   Try<PID<Master> > master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  FrameworkInfo frameworkInfo; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_role("foo");
 
   MockScheduler sched;
@@ -733,8 +710,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedRole)
   Try<PID<Master> > master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  FrameworkInfo frameworkInfo; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_role("foo");
 
   MockScheduler sched;
@@ -789,6 +765,9 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
     .WillOnce(DoAll(FutureSatisfy(&authorize2),
                     Return(promise2.future())))
     .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
+
+  // Pause the clock to avoid registration retries.
+  Clock::pause();
 
   driver.start();
 

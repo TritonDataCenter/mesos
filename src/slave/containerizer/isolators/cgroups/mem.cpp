@@ -21,7 +21,6 @@
 #include <list>
 #include <vector>
 
-#include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 #include <mesos/values.hpp>
 
@@ -33,16 +32,15 @@
 #include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
-#include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
 #include <stout/lambda.hpp>
-#include <stout/nothing.hpp>
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 
-#include "linux/cgroups.hpp"
+#include "common/protobuf_utils.hpp"
 
+#include "slave/containerizer/isolators/cgroups/constants.hpp"
 #include "slave/containerizer/isolators/cgroups/mem.hpp"
 
 using namespace process;
@@ -56,10 +54,10 @@ using std::set;
 using std::string;
 using std::vector;
 
-using mesos::slave::ExecutorRunState;
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerPrepareInfo;
+using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
-using mesos::slave::IsolatorProcess;
-using mesos::slave::Limitation;
 
 namespace mesos {
 namespace internal {
@@ -151,19 +149,19 @@ Try<Isolator*> CgroupsMemIsolatorProcess::create(const Flags& flags)
     limitSwap = true;
   }
 
-  process::Owned<IsolatorProcess> process(
+  process::Owned<MesosIsolatorProcess> process(
       new CgroupsMemIsolatorProcess(flags, hierarchy.get(), limitSwap));
 
-  return new Isolator(process);
+  return new MesosIsolator(process);
 }
 
 
 Future<Nothing> CgroupsMemIsolatorProcess::recover(
-    const list<ExecutorRunState>& states,
+    const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
-  foreach (const ExecutorRunState& state, states) {
-    const ContainerID& containerId = state.id;
+  foreach (const ContainerState& state, states) {
+    const ContainerID& containerId = state.container_id();
     const string cgroup = path::join(flags.cgroups_root, containerId.value());
 
     Try<bool> exists = cgroups::exists(hierarchy, cgroup);
@@ -233,11 +231,10 @@ Future<Nothing> CgroupsMemIsolatorProcess::recover(
 }
 
 
-Future<Option<CommandInfo>> CgroupsMemIsolatorProcess::prepare(
+Future<Option<ContainerPrepareInfo>> CgroupsMemIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo,
     const string& directory,
-    const Option<string>& rootfs,
     const Option<string>& user)
 {
   if (infos.contains(containerId)) {
@@ -284,7 +281,7 @@ Future<Option<CommandInfo>> CgroupsMemIsolatorProcess::prepare(
   pressureListen(containerId);
 
   return update(containerId, executorInfo.resources())
-    .then([]() -> Future<Option<CommandInfo>> {
+    .then([]() -> Future<Option<ContainerPrepareInfo>> {
       return None();
     });
 }
@@ -315,7 +312,7 @@ Future<Nothing> CgroupsMemIsolatorProcess::isolate(
 }
 
 
-Future<Limitation> CgroupsMemIsolatorProcess::watch(
+Future<ContainerLimitation> CgroupsMemIsolatorProcess::watch(
     const ContainerID& containerId)
 {
   if (!infos.contains(containerId)) {
@@ -477,6 +474,11 @@ Future<ResourceStatistics> CgroupsMemIsolatorProcess::usage(
   Option<uint64_t> total_swap = stat.get().get("total_swap");
   if (total_swap.isSome()) {
     result.set_mem_swap_bytes(total_swap.get());
+  }
+
+  Option<uint64_t> total_unevictable = stat.get().get("total_unevictable");
+  if (total_unevictable.isSome()) {
+    result.set_mem_unevictable_bytes(total_unevictable.get());
   }
 
   // Get pressure counter readings.
@@ -692,7 +694,8 @@ void CgroupsMemIsolatorProcess::oom(const ContainerID& containerId)
       stringify(usage.isSome() ? usage.get().megabytes() : 0),
       "*").get();
 
-  info->limitation.set(Limitation(mem, message.str()));
+  info->limitation.set(protobuf::slave::createContainerLimitation(
+        mem, message.str()));
 }
 
 

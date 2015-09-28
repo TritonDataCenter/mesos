@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 
+#include <mesos/slave/isolator.hpp>
+
 #include <mesos/type_utils.hpp>
 
 #include <process/clock.hpp>
@@ -25,9 +27,18 @@
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
 
+#include "common/protobuf_utils.hpp"
+
 #include "messages/messages.hpp"
 
 using std::string;
+
+using google::protobuf::RepeatedPtrField;
+
+using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerState;
+
+using process::UPID;
 
 namespace mesos {
 namespace internal {
@@ -50,10 +61,11 @@ StatusUpdate createStatusUpdate(
     const TaskState& state,
     const TaskStatus::Source& source,
     const Option<UUID>& uuid,
-    const string& message = "",
-    const Option<TaskStatus::Reason>& reason = None(),
-    const Option<ExecutorID>& executorId = None(),
-    const Option<bool>& healthy = None())
+    const string& message,
+    const Option<TaskStatus::Reason>& reason,
+    const Option<ExecutorID>& executorId,
+    const Option<bool>& healthy,
+    const Option<Labels>& labels)
 {
   StatusUpdate update;
 
@@ -83,6 +95,15 @@ StatusUpdate createStatusUpdate(
   if (uuid.isSome()) {
     update.set_uuid(uuid.get().toBytes());
     status->set_uuid(uuid.get().toBytes());
+  } else {
+    // Note that in 0.22.x, the StatusUpdate.uuid was required
+    // even though the scheduler driver ignores it for master
+    // and scheduler driver generated updates. So we continue
+    // to "set" it here so that updates coming from a 0.23.x
+    // master can be parsed by a 0.22.x scheduler driver.
+    //
+    // TODO(bmahler): In 0.24.x, leave the uuid unset.
+    update.set_uuid("");
   }
 
   if (reason.isSome()) {
@@ -91,6 +112,10 @@ StatusUpdate createStatusUpdate(
 
   if (healthy.isSome()) {
     status->set_healthy(healthy.get());
+  }
+
+  if (labels.isSome()) {
+    status->mutable_labels()->CopyFrom(labels.get());
   }
 
   return update;
@@ -114,7 +139,9 @@ Task createTask(
     t.mutable_executor_id()->CopyFrom(task.executor().executor_id());
   }
 
-  t.mutable_labels()->MergeFrom(task.labels());
+  if (task.has_labels()) {
+    t.mutable_labels()->CopyFrom(task.labels());
+  }
 
   if (task.has_discovery()) {
     t.mutable_discovery()->MergeFrom(task.discovery());
@@ -156,25 +183,141 @@ Option<bool> getTaskHealth(const Task& task)
  * @return A fully formed `MasterInfo` with the IP/hostname information
  *    as derived from the `UPID`.
  */
-MasterInfo createMasterInfo(const process::UPID& pid)
+MasterInfo createMasterInfo(const UPID& pid)
 {
   MasterInfo info;
   info.set_id(stringify(pid) + "-" + UUID::random().toString());
 
   // NOTE: Currently, we store the ip in network order, which should
   // be fixed. See MESOS-1201 for more details.
+  // TODO(marco): `ip` and `port` are deprecated in favor of `address`;
+  //     remove them both after the deprecation cycle.
   info.set_ip(pid.address.ip.in().get().s_addr);
-
   info.set_port(pid.address.port);
+
+  info.mutable_address()->set_ip(stringify(pid.address.ip));
+  info.mutable_address()->set_port(pid.address.port);
+
   info.set_pid(pid);
 
   Try<string> hostname = net::getHostname(pid.address.ip);
   if (hostname.isSome()) {
+    // Hostname is deprecated; but we need to update it
+    // to maintain backward compatibility.
+    // TODO(marco): Remove once we deprecate it.
     info.set_hostname(hostname.get());
+    info.mutable_address()->set_hostname(hostname.get());
   }
 
   return info;
 }
+
+
+Label createLabel(const std::string& key, const std::string& value)
+{
+  Label label;
+  label.set_key(key);
+  label.set_value(value);
+  return label;
+}
+
+
+TimeInfo getCurrentTime()
+{
+  TimeInfo timeInfo;
+  timeInfo.set_nanoseconds(process::Clock::now().duration().ns());
+  return timeInfo;
+}
+
+namespace slave {
+
+ContainerLimitation createContainerLimitation(
+    const Resources& resources,
+    const std::string& message)
+{
+  ContainerLimitation limitation;
+  foreach (Resource resource, resources) {
+    limitation.add_resources()->CopyFrom(resource);
+  }
+  limitation.set_message(message);
+  return limitation;
+}
+
+
+ContainerState createContainerState(
+    const ExecutorInfo& executorInfo,
+    const ContainerID& container_id,
+    pid_t pid,
+    const std::string& directory)
+{
+  ContainerState state;
+  state.mutable_executor_info()->CopyFrom(executorInfo);
+  state.mutable_container_id()->CopyFrom(container_id);
+  state.set_pid(pid);
+  state.set_directory(directory);
+  return state;
+}
+
+} // namespace slave {
+
+namespace maintenance {
+
+Unavailability createUnavailability(
+    const process::Time& start,
+    const Option<Duration>& duration)
+{
+  Unavailability unavailability;
+  unavailability.mutable_start()->set_nanoseconds(start.duration().ns());
+
+  if (duration.isSome()) {
+    unavailability.mutable_duration()->set_nanoseconds(duration.get().ns());
+  }
+
+  return unavailability;
+}
+
+
+RepeatedPtrField<MachineID> createMachineList(
+    std::initializer_list<MachineID> ids)
+{
+  RepeatedPtrField<MachineID> array;
+
+  foreach (const MachineID& id, ids) {
+    array.Add()->CopyFrom(id);
+  }
+
+  return array;
+}
+
+
+mesos::maintenance::Window createWindow(
+    std::initializer_list<MachineID> ids,
+    const Unavailability& unavailability)
+{
+  mesos::maintenance::Window window;
+  window.mutable_unavailability()->CopyFrom(unavailability);
+
+  foreach (const MachineID& id, ids) {
+    window.add_machine_ids()->CopyFrom(id);
+  }
+
+  return window;
+}
+
+
+mesos::maintenance::Schedule createSchedule(
+    std::initializer_list<mesos::maintenance::Window> windows)
+{
+  mesos::maintenance::Schedule schedule;
+
+  foreach (const mesos::maintenance::Window& window, windows) {
+    schedule.add_windows()->CopyFrom(window);
+  }
+
+  return schedule;
+}
+
+} // namespace maintenance {
 
 } // namespace protobuf {
 } // namespace internal {

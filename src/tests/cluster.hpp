@@ -26,6 +26,8 @@
 
 #include <mesos/mesos.hpp>
 
+#include <mesos/authorizer/authorizer.hpp>
+
 #include <mesos/master/allocator.hpp>
 
 #include <mesos/slave/resource_estimator.hpp>
@@ -49,18 +51,19 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include "authorizer/local/authorizer.hpp"
+
 #include "files/files.hpp"
 
 #ifdef __linux__
 #include "linux/cgroups.hpp"
 #endif // __linux__
 
-#include "authorizer/authorizer.hpp"
-
 #include "log/log.hpp"
 
 #include "log/tool/initialize.hpp"
 
+#include "master/constants.hpp"
 #include "master/contender.hpp"
 #include "master/detector.hpp"
 #include "master/flags.hpp"
@@ -119,10 +122,28 @@ public:
     // Returns a new master detector for this instance of masters.
     process::Owned<MasterDetector> detector();
 
+    /**
+     * The internal map from UPID to Master processes is not available
+     * externally to test methods; this lookup method helps to expose this to
+     * `MesosTest` classes.
+     *
+     * @param pid the PID for the Master process being looked up.
+     * @return a pointer to the `master::Master` process, whose UPID corresponds
+     *     to the given value, if any.
+     */
+    Option<master::Master*> find(const process::PID<master::Master>& pid)
+    {
+      if (masters.count(pid) != 0) {
+        return masters[pid].master;
+      }
+
+      return None();
+    }
+
   private:
     // Not copyable, not assignable.
     Masters(const Masters&);
-    Masters& operator = (const Masters&);
+    Masters& operator=(const Masters&);
 
     Cluster* cluster; // Enclosing class.
     Option<zookeeper::URL> url;
@@ -187,7 +208,7 @@ public:
   private:
     // Not copyable, not assignable.
     Slaves(const Slaves&);
-    Slaves& operator = (const Slaves&);
+    Slaves& operator=(const Slaves&);
 
     Cluster* cluster; // Enclosing class.
     Masters* masters; // Used to create MasterDetector instances.
@@ -223,6 +244,20 @@ public:
     slaves.shutdown();
   }
 
+  /**
+   * Thin wrapper around the internal `Masters::find()` lookup method, which is
+   * otherwise inaccessible from test methods.
+   *
+   * @param pid the PID for the Master process being looked up.
+   * @return a pointer to the `master::Master` process, whose PID corresponds
+   *     to the given value, if any.
+   */
+  Option<master::Master*> find(const process::PID<master::Master>& pid)
+  {
+    return masters.find(pid);
+  }
+
+
   // Cluster wide shared abstractions.
   Files files;
 
@@ -232,7 +267,7 @@ public:
 private:
   // Not copyable, not assignable.
   Cluster(const Cluster&);
-  Cluster& operator = (const Cluster&);
+  Cluster& operator=(const Cluster&);
 };
 
 
@@ -349,15 +384,22 @@ inline Try<process::PID<master::Master>> Cluster::Masters::start(
   if (authorizer.isSome()) {
     CHECK_NOTNULL(authorizer.get());
   } else if (flags.acls.isSome()) {
-    Try<process::Owned<Authorizer>> create =
-      Authorizer::create(flags.acls.get());
+    Try<Authorizer*> local = Authorizer::create(master::DEFAULT_AUTHORIZER);
 
-    if (create.isError()) {
-      return Error("Failed to initialize the authorizer: " +
-                   create.error() + " (see --acls flag)");
+    if (local.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to instantiate the local authorizer: "
+        << local.error();
     }
 
-    master.authorizer = process::Owned<Authorizer>(create.get());
+    Try<Nothing> initialized = local.get()->initialize(flags.acls.get());
+
+    if (initialized.isError()) {
+      return Error("Failed to initialize the authorizer: " +
+                   initialized.error() + " (see --acls flag)");
+    }
+
+    master.authorizer.reset(local.get());
   }
 
   if (slaveRemovalLimiter.isNone() &&
@@ -595,13 +637,13 @@ inline Try<process::PID<slave::Slave>> Cluster::Slaves::start(
 
   slave.slave = new slave::Slave(
       flags,
-      detector.get(slave.detector.get()),
+      detector.getOrElse(slave.detector.get()),
       slave.containerizer,
       &cluster->files,
-      gc.get(slave.gc.get()),
-      statusUpdateManager.get(slave.statusUpdateManager.get()),
-      resourceEstimator.get(slave.resourceEstimator.get()),
-      qosController.get(slave.qosController.get()));
+      gc.getOrElse(slave.gc.get()),
+      statusUpdateManager.getOrElse(slave.statusUpdateManager.get()),
+      resourceEstimator.getOrElse(slave.resourceEstimator.get()),
+      qosController.getOrElse(slave.qosController.get()));
 
   process::PID<slave::Slave> pid = process::spawn(slave.slave);
 

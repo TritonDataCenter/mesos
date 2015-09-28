@@ -40,6 +40,7 @@
 #include <stout/try.hpp>
 
 #include <mesos/fetcher/fetcher.hpp>
+#include <mesos/type_utils.hpp>
 
 #include "slave/containerizer/fetcher.hpp"
 #include "slave/flags.hpp"
@@ -278,13 +279,10 @@ class HttpProcess : public Process<HttpProcess>
 public:
   HttpProcess()
   {
-    route("/help", None(), &HttpProcess::index);
+    route("/test", None(), &HttpProcess::test);
   }
 
-  Future<http::Response> index(const http::Request& request)
-  {
-    return http::OK();
-  }
+  MOCK_METHOD1(test, Future<http::Response>(const http::Request&));
 };
 
 
@@ -294,10 +292,15 @@ TEST_F(FetcherTest, OSNetUriTest)
 
   spawn(process);
 
-  string url = "http://" + net::getHostname(process.self().address.ip).get() +
-                ":" + stringify(process.self().address.port) + "/help";
+  const network::Address& address = process.self().address;
 
-  string localFile = path::join(os::getcwd(), "help");
+  process::http::URL url(
+      "http",
+      address.ip,
+      address.port,
+      path::join(process.self().id, "test"));
+
+  string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
@@ -309,13 +312,67 @@ TEST_F(FetcherTest, OSNetUriTest)
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(url);
+  uri->set_value(stringify(url));
 
   Fetcher fetcher;
   SlaveID slaveId;
 
+  EXPECT_CALL(process, test(_))
+    .WillOnce(Return(http::OK()));
+
   Future<Nothing> fetch = fetcher.fetch(
       containerId, commandInfo, os::getcwd(), None(), slaveId, flags);
+
+  AWAIT_READY(fetch);
+
+  EXPECT_TRUE(os::exists(localFile));
+}
+
+
+// Tests whether fetcher can process URIs that contain leading whitespace
+// characters. This was added as a verification for MESOS-2862.
+//
+// TODO(hartem): This test case should be merged with the previous one.
+TEST_F(FetcherTest, OSNetUriSpaceTest)
+{
+  HttpProcess process;
+
+  spawn(process);
+
+  const network::Address& address = process.self().address;
+
+  process::http::URL url(
+      "http",
+      address.ip,
+      address.port,
+      path::join(process.self().id, "test"));
+
+  string localFile = path::join(os::getcwd(), "test");
+  EXPECT_FALSE(os::exists(localFile));
+
+  slave::Flags flags;
+  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.frameworks_home = "/tmp/frameworks";
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+
+  // Add whitespace characters to the beginning of the URL.
+  uri->set_value("\r\n\t " + stringify(url));
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  // Verify that the intended endpoint is hit.
+  EXPECT_CALL(process, test(_))
+    .WillOnce(Return(http::OK()));
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId, commandInfo, os::getcwd(), None(), slaveId, flags);
+
   AWAIT_READY(fetch);
 
   EXPECT_TRUE(os::exists(localFile));

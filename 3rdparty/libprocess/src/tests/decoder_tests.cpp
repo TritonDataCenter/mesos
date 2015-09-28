@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <gmock/gmock.h>
 
 #include <deque>
@@ -17,7 +31,7 @@ using std::string;
 
 using process::network::Socket;
 
-TEST(Decoder, Request)
+TEST(DecoderTest, Request)
 {
   Try<Socket> socket = Socket::create();
   ASSERT_SOME(socket);
@@ -36,26 +50,26 @@ TEST(Decoder, Request)
 
   Request* request = requests[0];
   EXPECT_EQ("GET", request->method);
-  EXPECT_EQ("/path/file.json", request->path);
-  EXPECT_EQ("/path/file.json?key1=value1&key2=value2#fragment", request->url);
-  EXPECT_EQ("fragment", request->fragment);
+
+  EXPECT_EQ("/path/file.json", request->url.path);
+  EXPECT_SOME_EQ("fragment", request->url.fragment);
+  EXPECT_EQ(2u, request->url.query.size());
+  EXPECT_SOME_EQ("value1", request->url.query.get("key1"));
+  EXPECT_SOME_EQ("value2", request->url.query.get("key2"));
+
   EXPECT_TRUE(request->body.empty());
   EXPECT_FALSE(request->keepAlive);
 
-  EXPECT_EQ(3, request->headers.size());
+  EXPECT_EQ(3u, request->headers.size());
   EXPECT_SOME_EQ("localhost", request->headers.get("Host"));
   EXPECT_SOME_EQ("close", request->headers.get("Connection"));
   EXPECT_SOME_EQ("compress, gzip", request->headers.get("Accept-Encoding"));
-
-  EXPECT_EQ(2, request->query.size());
-  EXPECT_SOME_EQ("value1", request->query.get("key1"));
-  EXPECT_SOME_EQ("value2", request->query.get("key2"));
 
   delete request;
 }
 
 
-TEST(Decoder, RequestHeaderContinuation)
+TEST(DecoderTest, RequestHeaderContinuation)
 {
   Try<Socket> socket = Socket::create();
   ASSERT_SOME(socket);
@@ -80,8 +94,7 @@ TEST(Decoder, RequestHeaderContinuation)
 }
 
 
-// This is expected to fail for now, see my TODO(bmahler) on http::Request.
-TEST(Decoder, DISABLED_RequestHeaderCaseInsensitive)
+TEST(DecoderTest, RequestHeaderCaseInsensitive)
 {
   Try<Socket> socket = Socket::create();
   ASSERT_SOME(socket);
@@ -107,7 +120,7 @@ TEST(Decoder, DISABLED_RequestHeaderCaseInsensitive)
 }
 
 
-TEST(Decoder, Response)
+TEST(DecoderTest, Response)
 {
   ResponseDecoder decoder;
 
@@ -135,7 +148,7 @@ TEST(Decoder, Response)
 }
 
 
-TEST(Decoder, StreamingResponse)
+TEST(DecoderTest, StreamingResponse)
 {
   StreamingResponseDecoder decoder;
 
@@ -149,7 +162,7 @@ TEST(Decoder, StreamingResponse)
   const string body = "hi";
 
   deque<Response*> responses = decoder.decode(headers.data(), headers.length());
-  ASSERT_FALSE(decoder.failed());
+  EXPECT_FALSE(decoder.failed());
   ASSERT_EQ(1, responses.size());
 
   Response* response = responses[0];
@@ -165,9 +178,11 @@ TEST(Decoder, StreamingResponse)
   EXPECT_TRUE(read.isPending());
 
   decoder.decode(body.data(), body.length());
+  EXPECT_FALSE(decoder.failed());
 
   // Feeding EOF to the decoder should be ok.
   decoder.decode("", 0);
+  EXPECT_FALSE(decoder.failed());
 
   EXPECT_TRUE(read.isReady());
   EXPECT_EQ("hi", read.get());
@@ -179,7 +194,7 @@ TEST(Decoder, StreamingResponse)
 }
 
 
-TEST(Decoder, StreamingResponseFailure)
+TEST(DecoderTest, StreamingResponseFailure)
 {
   StreamingResponseDecoder decoder;
 
@@ -194,9 +209,9 @@ TEST(Decoder, StreamingResponseFailure)
   const string body = "1";
 
   deque<Response*> responses = decoder.decode(headers.data(), headers.length());
-  ASSERT_FALSE(decoder.failed());
-  ASSERT_EQ(1, responses.size());
+  EXPECT_FALSE(decoder.failed());
 
+  ASSERT_EQ(1, responses.size());
   Response* response = responses[0];
 
   EXPECT_EQ("200 OK", response->status);
@@ -210,6 +225,7 @@ TEST(Decoder, StreamingResponseFailure)
   EXPECT_TRUE(read.isPending());
 
   decoder.decode(body.data(), body.length());
+  EXPECT_FALSE(decoder.failed());
 
   EXPECT_TRUE(read.isReady());
   EXPECT_EQ("1", read.get());
@@ -220,6 +236,7 @@ TEST(Decoder, StreamingResponseFailure)
 
   // Feeding EOF to the decoder should trigger a failure!
   decoder.decode("", 0);
+  EXPECT_TRUE(decoder.failed());
 
   EXPECT_TRUE(read.isFailed());
   EXPECT_EQ("failed to decode body", read.failure());

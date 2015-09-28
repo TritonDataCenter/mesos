@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_FUTURE_HPP__
 #define __PROCESS_FUTURE_HPP__
 
@@ -99,12 +113,12 @@ public:
   // Futures are assignable (and copyable). This results in the
   // reference to the previous future data being decremented and a
   // reference to 'that' being incremented.
-  Future<T>& operator = (const Future<T>& that);
+  Future<T>& operator=(const Future<T>& that);
 
   // Comparision operators useful for using futures in collections.
-  bool operator == (const Future<T>& that) const;
-  bool operator != (const Future<T>& that) const;
-  bool operator < (const Future<T>& that) const;
+  bool operator==(const Future<T>& that) const;
+  bool operator!=(const Future<T>& that) const;
+  bool operator<(const Future<T>& that) const;
 
   // Helpers to get the current state of this future.
   bool isPending() const;
@@ -134,6 +148,7 @@ public:
   // Return the value associated with this future, waits indefinitely
   // until a value gets associated or until the future is discarded.
   const T& get() const;
+  const T* operator->() const;
 
   // Returns the failure message associated with this future.
   const std::string& failure() const;
@@ -513,7 +528,7 @@ private:
 
   // Not copyable, not assignable.
   Promise(const Promise<T>&);
-  Promise<T>& operator = (const Promise<T>&);
+  Promise<T>& operator=(const Promise<T>&);
 
   // Helper for doing the work of actually discarding a future (called
   // from Promise::discard as well as internal::discarded).
@@ -880,7 +895,7 @@ Future<T>::Future(const Try<T>& t)
 
 
 template <typename T>
-Future<T>& Future<T>::operator = (const Future<T>& that)
+Future<T>& Future<T>::operator=(const Future<T>& that)
 {
   if (this != &that) {
     data = that.data;
@@ -890,21 +905,21 @@ Future<T>& Future<T>::operator = (const Future<T>& that)
 
 
 template <typename T>
-bool Future<T>::operator == (const Future<T>& that) const
+bool Future<T>::operator==(const Future<T>& that) const
 {
   return data == that.data;
 }
 
 
 template <typename T>
-bool Future<T>::operator != (const Future<T>& that) const
+bool Future<T>::operator!=(const Future<T>& that) const
 {
   return !(*this == that);
 }
 
 
 template <typename T>
-bool Future<T>::operator < (const Future<T>& that) const
+bool Future<T>::operator<(const Future<T>& that) const
 {
   return data < that.data;
 }
@@ -1040,6 +1055,13 @@ const T& Future<T>::get() const
 
   assert(data->result.isSome());
   return data->result.get();
+}
+
+
+template <typename T>
+const T* Future<T>::operator->() const
+{
+  return &get();
 }
 
 

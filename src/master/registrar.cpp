@@ -228,13 +228,11 @@ Future<T> timeout(
 
 
 // Helper for failing a deque of operations.
-void fail(deque<Owned<Operation> >* operations, const string& message)
+void fail(deque<Owned<Operation>>* operations, const string& message)
 {
   while (!operations->empty()) {
-    Owned<Operation> operation = operations->front();
+    operations->front()->fail(message);
     operations->pop_front();
-
-    operation->fail(message);
   }
 }
 
@@ -247,7 +245,7 @@ Future<Response> RegistrarProcess::registry(const Request& request)
     result = JSON::Protobuf(variable.get().get());
   }
 
-  return OK(result, request.query.get("jsonp"));
+  return OK(result, request.url.query.get("jsonp"));
 }
 
 
@@ -256,8 +254,6 @@ string RegistrarProcess::registryHelp()
   return HELP(
       TLDR(
           "Returns the current contents of the Registry in JSON."),
-      USAGE(
-          "/registrar(1)/registry"),
       DESCRIPTION(
           "Example:"
           "",

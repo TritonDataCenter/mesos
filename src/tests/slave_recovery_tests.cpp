@@ -27,6 +27,8 @@
 #include <mesos/resources.hpp>
 #include <mesos/scheduler.hpp>
 
+#include <mesos/scheduler/scheduler.hpp>
+
 #include <process/dispatch.hpp>
 #include <process/gmock.hpp>
 #include <process/owned.hpp>
@@ -166,8 +168,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverSlaveState)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -182,14 +183,14 @@ TYPED_TEST(SlaveRecoveryTest, RecoverSlaveState)
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return());      // Ignore subsequent offers.
 
-  Future<Message> registerFrameworkMessage =
-    FUTURE_MESSAGE(Eq(RegisterFrameworkMessage().GetTypeName()), _, _);
+  Future<Message> subscribeMessage = FUTURE_CALL_MESSAGE(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
 
   driver.start();
 
   // Capture the framework pid.
-  AWAIT_READY(registerFrameworkMessage);
-  UPID frameworkPid = registerFrameworkMessage.get().from;
+  AWAIT_READY(subscribeMessage);
+  UPID frameworkPid = subscribeMessage.get().from;
 
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
@@ -197,8 +198,6 @@ TYPED_TEST(SlaveRecoveryTest, RecoverSlaveState)
   SlaveID slaveId = offers.get()[0].slave_id();
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Scheduler expectations.
   EXPECT_CALL(sched, statusUpdate(_, _))
@@ -211,13 +210,13 @@ TYPED_TEST(SlaveRecoveryTest, RecoverSlaveState)
   Future<StatusUpdateMessage> update =
     FUTURE_PROTOBUF(StatusUpdateMessage(), Eq(master.get()), _);
 
-  Future<StatusUpdateAcknowledgementMessage> ack =
-    FUTURE_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, _);
+  Future<mesos::scheduler::Call> ack = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::ACKNOWLEDGE, _, _);
 
   Future<Nothing> _ack =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Capture the executor pids.
   AWAIT_READY(registerExecutorMessage);
@@ -308,12 +307,13 @@ TYPED_TEST(SlaveRecoveryTest, RecoverSlaveState)
         .tasks[task.task_id()]
         .updates.front().uuid());
 
+  const UUID& uuid = UUID::fromBytes(ack.get().acknowledge().uuid());
   ASSERT_TRUE(state
                 .frameworks[frameworkId]
                 .executors[executorId]
                 .runs[containerId.get()]
                 .tasks[task.task_id()]
-                .acks.contains(UUID::fromBytes(ack.get().uuid())));
+                .acks.contains(uuid));
 
   // Shut down the executor manually so that it doesn't hang around
   // after the test finishes.
@@ -348,8 +348,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverStatusUpdateManager)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -368,8 +367,6 @@ TYPED_TEST(SlaveRecoveryTest, RecoverStatusUpdateManager)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Message expectations.
   Future<Message> registerExecutor =
@@ -379,7 +376,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverStatusUpdateManager)
   Future<StatusUpdateMessage> update =
     DROP_PROTOBUF(StatusUpdateMessage(), _, _);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Capture the executor pid.
   AWAIT_READY(registerExecutor);
@@ -435,8 +432,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconnectExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -455,14 +451,12 @@ TYPED_TEST(SlaveRecoveryTest, ReconnectExecutor)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Drop the first update from the executor.
   Future<StatusUpdateMessage> statusUpdate =
     DROP_PROTOBUF(StatusUpdateMessage(), _, _);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Stop the slave before the status update is received.
   AWAIT_READY(statusUpdate);
@@ -531,8 +525,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverUnregisteredExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -550,14 +543,12 @@ TYPED_TEST(SlaveRecoveryTest, RecoverUnregisteredExecutor)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Drop the executor registration message.
   Future<Message> registerExecutor =
     DROP_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Stop the slave before the executor is registered.
   AWAIT_READY(registerExecutor);
@@ -596,7 +587,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverUnregisteredExecutor)
 
   // Now advance time until the reaper reaps the executor.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -644,8 +635,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverTerminatedExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -663,8 +653,6 @@ TYPED_TEST(SlaveRecoveryTest, RecoverTerminatedExecutor)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   Future<Message> registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
@@ -674,7 +662,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverTerminatedExecutor)
   Future<Nothing> ack =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Capture the executor pid.
   AWAIT_READY(registerExecutor);
@@ -718,7 +706,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverTerminatedExecutor)
 
   // Now advance time until the reaper reaps the executor.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -772,8 +760,7 @@ TYPED_TEST(SlaveRecoveryTest, DISABLED_RecoveryTimeout)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -792,15 +779,13 @@ TYPED_TEST(SlaveRecoveryTest, DISABLED_RecoveryTimeout)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -867,8 +852,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverCompletedExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -887,8 +871,6 @@ TYPED_TEST(SlaveRecoveryTest, RecoverCompletedExecutor)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "exit 0");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Short-lived task.
 
   EXPECT_CALL(sched, statusUpdate(_, _))
     .Times(2); // TASK_RUNNING and TASK_FINISHED updates.
@@ -899,7 +881,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverCompletedExecutor)
   Future<Nothing> schedule = FUTURE_DISPATCH(
       _, &GarbageCollectorProcess::schedule);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // We use 'gc.schedule' as a proxy for the cleanup of the executor.
   AWAIT_READY(schedule);
@@ -959,8 +941,7 @@ TYPED_TEST(SlaveRecoveryTest, CleanupExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -979,15 +960,13 @@ TYPED_TEST(SlaveRecoveryTest, CleanupExecutor)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> ack =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(ack);
@@ -1021,7 +1000,7 @@ TYPED_TEST(SlaveRecoveryTest, CleanupExecutor)
 
   // Now advance time until the reaper reaps the executor.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -1060,8 +1039,7 @@ TYPED_TEST(SlaveRecoveryTest, RemoveNonCheckpointingFramework)
   MockScheduler sched;
 
   // Disable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(false);
 
   MesosSchedulerDriver driver(
@@ -1167,8 +1145,7 @@ TYPED_TEST(SlaveRecoveryTest, NonCheckpointingFramework)
   MockScheduler sched;
 
   // Disable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(false);
 
   MesosSchedulerDriver driver(
@@ -1189,15 +1166,13 @@ TYPED_TEST(SlaveRecoveryTest, NonCheckpointingFramework)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   Future<Nothing> update;
   EXPECT_CALL(sched, statusUpdate(_, _))
     .WillOnce(FutureSatisfy(&update))
     .WillRepeatedly(Return());        // Ignore subsequent updates.
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait for TASK_RUNNING update.
   AWAIT_READY(update);
@@ -1254,8 +1229,7 @@ TYPED_TEST(SlaveRecoveryTest, KillTask)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1274,15 +1248,13 @@ TYPED_TEST(SlaveRecoveryTest, KillTask)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> ack =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(ack);
@@ -1377,8 +1349,7 @@ TYPED_TEST(SlaveRecoveryTest, Reboot)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1396,8 +1367,6 @@ TYPED_TEST(SlaveRecoveryTest, Reboot)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Capture the slave and framework ids.
   SlaveID slaveId = offers1.get()[0].slave_id();
@@ -1411,7 +1380,7 @@ TYPED_TEST(SlaveRecoveryTest, Reboot)
     .WillOnce(FutureSatisfy(&status))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Capture the executor ID and PID.
   AWAIT_READY(registerExecutorMessage);
@@ -1515,8 +1484,7 @@ TYPED_TEST(SlaveRecoveryTest, GCExecutor)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1534,8 +1502,6 @@ TYPED_TEST(SlaveRecoveryTest, GCExecutor)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Capture the slave and framework ids.
   SlaveID slaveId = offers1.get()[0].slave_id();
@@ -1549,7 +1515,7 @@ TYPED_TEST(SlaveRecoveryTest, GCExecutor)
     .WillOnce(FutureSatisfy(&status))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Capture the executor id and pid.
   AWAIT_READY(registerExecutorMessage);
@@ -1667,8 +1633,7 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlave)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1689,8 +1654,6 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlave)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   Future<Nothing> statusUpdate1;
   EXPECT_CALL(sched, statusUpdate(_, _))
@@ -1700,7 +1663,7 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlave)
   Future<Message> registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Capture the executor pid.
   AWAIT_READY(registerExecutor);
@@ -1722,7 +1685,7 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlave)
 
   // Now advance time until the reaper reaps the executor.
   while (executorTerminated.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -1788,8 +1751,7 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlaveSIGUSR1)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1809,14 +1771,12 @@ TYPED_TEST(SlaveRecoveryTest, ShutdownSlaveSIGUSR1)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(_, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   ASSERT_EQ(TASK_RUNNING, status.get().state());
@@ -1892,8 +1852,7 @@ TYPED_TEST(SlaveRecoveryTest, RegisterDisconnectedSlave)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -1912,8 +1871,6 @@ TYPED_TEST(SlaveRecoveryTest, RegisterDisconnectedSlave)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Capture the slave and framework ids.
   SlaveID slaveId = offers.get()[0].slave_id();
@@ -1926,7 +1883,7 @@ TYPED_TEST(SlaveRecoveryTest, RegisterDisconnectedSlave)
   EXPECT_CALL(sched, statusUpdate(_, _))
     .WillOnce(FutureSatisfy(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Capture the executor pid.
   AWAIT_READY(registerExecutorMessage);
@@ -2004,8 +1961,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileKillTask)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -2023,8 +1979,6 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileKillTask)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Capture the slave and framework ids.
   SlaveID slaveId = offers1.get()[0].slave_id();
@@ -2036,7 +1990,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileKillTask)
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Wait for TASK_RUNNING update to be acknowledged.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2107,8 +2061,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileShutdownFramework)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -2137,10 +2090,8 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileShutdownFramework)
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait for TASK_RUNNING update to be acknowledged.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2148,15 +2099,15 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileShutdownFramework)
   this->Stop(slave.get());
   delete containerizer1.get();
 
-  Future<UnregisterFrameworkMessage> unregisterFrameworkMessage =
-    FUTURE_PROTOBUF(UnregisterFrameworkMessage(), _, _);
+  Future<mesos::scheduler::Call> teardownCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::TEARDOWN, _, _);
 
   // Now stop the framework.
   driver.stop();
   driver.join();
 
-  // Wait util the framework is removed.
-  AWAIT_READY(unregisterFrameworkMessage);
+  // Wait until the framework is removed.
+  AWAIT_READY(teardownCall);
 
   Future<ShutdownFrameworkMessage> shutdownFrameworkMessage =
     FUTURE_PROTOBUF(ShutdownFrameworkMessage(), _, _);
@@ -2192,14 +2143,14 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileTasksMissingFromSlave)
 {
   TestAllocator<master::allocator::HierarchicalDRFAllocator> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _));
 
   Try<PID<Master> > master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
 
   slave::Flags flags = this->CreateSlaveFlags();
 
-  EXPECT_CALL(allocator, addSlave(_, _, _, _));
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
   Fetcher fetcher;
 
@@ -2212,8 +2163,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileTasksMissingFromSlave)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -2239,15 +2189,13 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileTasksMissingFromSlave)
   // We'll ensure the slave does not have this task when it
   // re-registers by wiping the relevant meta directory.
   TaskInfo task = createTask(offers1.get()[0], "sleep 10");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2378,8 +2326,7 @@ TYPED_TEST(SlaveRecoveryTest, SchedulerFailover)
   // Launch the first (i.e., failing) scheduler.
   MockScheduler sched1;
 
-  FrameworkInfo framework1;
-  framework1.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo framework1 = DEFAULT_FRAMEWORK_INFO;
   framework1.set_checkpoint(true);
 
   MesosSchedulerDriver driver1(
@@ -2401,15 +2348,13 @@ TYPED_TEST(SlaveRecoveryTest, SchedulerFailover)
 
   // Create a long running task.
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   EXPECT_CALL(sched1, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver1.launchTasks(offers1.get()[0].id(), tasks);
+  driver1.launchTasks(offers1.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2421,8 +2366,7 @@ TYPED_TEST(SlaveRecoveryTest, SchedulerFailover)
   // framework id recorded from the first scheduler.
   MockScheduler sched2;
 
-  FrameworkInfo framework2;
-  framework2.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
   framework2.set_checkpoint(true);
 
@@ -2525,10 +2469,11 @@ TYPED_TEST(SlaveRecoveryTest, PartitionedSlave)
 
   // Set these expectations up before we spawn the slave so that we
   // don't miss the first PING.
-  Future<Message> ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+  Future<Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   // Drop all the PONGs to simulate slave partition.
-  DROP_MESSAGES(Eq("PONG"), _, _);
+  DROP_MESSAGES(Eq(PongSlaveMessage().GetTypeName()), _, _);
 
   slave::Flags flags = this->CreateSlaveFlags();
 
@@ -2541,8 +2486,7 @@ TYPED_TEST(SlaveRecoveryTest, PartitionedSlave)
   ASSERT_SOME(slave);
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MockScheduler sched;
@@ -2563,15 +2507,13 @@ TYPED_TEST(SlaveRecoveryTest, PartitionedSlave)
 
   // Long running task.
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2601,7 +2543,7 @@ TYPED_TEST(SlaveRecoveryTest, PartitionedSlave)
     if (pings == masterFlags.max_slave_ping_timeouts) {
      break;
     }
-    ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+    ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.slave_ping_timeout);
     Clock::settle();
   }
@@ -2621,7 +2563,7 @@ TYPED_TEST(SlaveRecoveryTest, PartitionedSlave)
 
   // Wait for the executor to be terminated.
   while (executorTerminated.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -2675,8 +2617,7 @@ TYPED_TEST(SlaveRecoveryTest, MasterFailover)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   Owned<StandaloneMasterDetector> detector(
@@ -2700,15 +2641,13 @@ TYPED_TEST(SlaveRecoveryTest, MasterFailover)
   EXPECT_NE(0u, offers1.get().size());
 
   TaskInfo task = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   EXPECT_CALL(sched, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks);
+  driver.launchTasks(offers1.get()[0].id(), {task});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement);
@@ -2819,8 +2758,7 @@ TYPED_TEST(SlaveRecoveryTest, MultipleFrameworks)
   MockScheduler sched1;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo1;
-  frameworkInfo1.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo1.set_checkpoint(true);
 
   MesosSchedulerDriver driver1(
@@ -2846,15 +2784,13 @@ TYPED_TEST(SlaveRecoveryTest, MultipleFrameworks)
 
   // Framework 1 launches a task.
   TaskInfo task1 = createTask(offer1, "sleep 1000");
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1); // Long-running task.
 
   EXPECT_CALL(sched1, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement1 =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  driver1.launchTasks(offer1.id(), tasks1);
+  driver1.launchTasks(offer1.id(), {task1});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement1);
@@ -2863,8 +2799,7 @@ TYPED_TEST(SlaveRecoveryTest, MultipleFrameworks)
   MockScheduler sched2;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo2;
-  frameworkInfo2.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.set_checkpoint(true);
 
   MesosSchedulerDriver driver2(
@@ -2885,14 +2820,11 @@ TYPED_TEST(SlaveRecoveryTest, MultipleFrameworks)
   // Framework 2 launches a task.
   TaskInfo task2 = createTask(offers2.get()[0], "sleep 1000");
 
-  vector<TaskInfo> tasks2;
-  tasks2.push_back(task2); // Long-running task.
-
   EXPECT_CALL(sched2, statusUpdate(_, _));
 
   Future<Nothing> _statusUpdateAcknowledgement2 =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
-  driver2.launchTasks(offers2.get()[0].id(), tasks2);
+  driver2.launchTasks(offers2.get()[0].id(), {task2});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement2);
@@ -2982,8 +2914,7 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
   ASSERT_SOME(master);
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MockScheduler sched;
@@ -3000,6 +2931,10 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
 
   // Start the first slave.
   slave::Flags flags1 = this->CreateSlaveFlags();
+
+  // NOTE: We cannot run multiple slaves simultaneously on a host if
+  // cgroups isolation is involved.
+  flags1.isolation = "filesystem/posix,posix/mem,posix/cpu";
 
 #ifdef __linux__
   // Disable putting slave into cgroup(s) because this is a multi-slave test.
@@ -3019,8 +2954,6 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
 
   // Launch a long running task in the first slave.
   TaskInfo task1 = createTask(offers1.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1);
 
   EXPECT_CALL(sched, statusUpdate(_, _))
     .Times(1);
@@ -3028,7 +2961,7 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
   Future<Nothing> _statusUpdateAcknowledgement1 =
     FUTURE_DISPATCH(slave1.get(), &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks1);
+  driver.launchTasks(offers1.get()[0].id(), {task1});
 
   // Wait for the ACK to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement1);
@@ -3039,6 +2972,10 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
 
   // Start the second slave.
   slave::Flags flags2 = this->CreateSlaveFlags();
+
+  // NOTE: We cannot run multiple slaves simultaneously on a host if
+  // cgroups isolation is involved.
+  flags2.isolation = "filesystem/posix,posix/mem,posix/cpu";
 
 #ifdef __linux__
   // Disable putting slave into cgroup(s) because this is a multi-slave test.
@@ -3056,8 +2993,6 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
 
   // Launch a long running task in each slave.
   TaskInfo task2 = createTask(offers2.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks2;
-  tasks2.push_back(task2);
 
   EXPECT_CALL(sched, statusUpdate(_, _))
     .Times(1);
@@ -3065,7 +3000,7 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
   Future<Nothing> _statusUpdateAcknowledgement2 =
     FUTURE_DISPATCH(slave2.get(), &Slave::_statusUpdateAcknowledgement);
 
-  driver.launchTasks(offers2.get()[0].id(), tasks2);
+  driver.launchTasks(offers2.get()[0].id(), {task2});
 
   // Wait for the ACKs to be checkpointed.
   AWAIT_READY(_statusUpdateAcknowledgement2);
@@ -3168,8 +3103,7 @@ TYPED_TEST(SlaveRecoveryTest, RestartBeforeContainerizerLaunch)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -3188,8 +3122,6 @@ TYPED_TEST(SlaveRecoveryTest, RestartBeforeContainerizerLaunch)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Expect the launch but don't do anything.
   Future<Nothing> launch;
@@ -3201,7 +3133,7 @@ TYPED_TEST(SlaveRecoveryTest, RestartBeforeContainerizerLaunch)
   EXPECT_CALL(sched, statusUpdate(_, _))
     .Times(0);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Once we see the call to launch, restart the slave.
   AWAIT_READY(launch);
@@ -3271,8 +3203,7 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, ResourceStatistics)
   MockScheduler sched;
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -3291,14 +3222,12 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, ResourceStatistics)
   EXPECT_NE(0u, offers.get().size());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long-running task.
 
   // Message expectations.
   Future<Message> registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(registerExecutor);
 
@@ -3381,8 +3310,7 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PerfRollForward)
     .WillRepeatedly(Return());
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -3404,14 +3332,12 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PerfRollForward)
 
   TaskInfo task1 = createTask(
       slaveId, Resources::parse("cpus:0.5;mem:128").get(), "sleep 1000");
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1);
 
   // Message expectations.
   Future<Message> registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks1);
+  driver.launchTasks(offers1.get()[0].id(), {task1});
 
   AWAIT_READY(registerExecutor);
 
@@ -3467,14 +3393,12 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PerfRollForward)
 
   // Start a new container which will start reporting perf statistics.
   TaskInfo task2 = createTask(offers2.get()[0], "sleep 1000");
-  vector<TaskInfo> tasks2;
-  tasks2.push_back(task2);
 
   // Message expectations.
   registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers2.get()[0].id(), tasks2);
+  driver.launchTasks(offers2.get()[0].id(), {task2});
 
   AWAIT_READY(registerExecutor);
 
@@ -3532,8 +3456,7 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceForward)
     .WillRepeatedly(Return());
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -3555,14 +3478,12 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceForward)
 
   TaskInfo task1 = createTask(
       slaveId, Resources::parse("cpus:0.5;mem:128").get(), "sleep 1000");
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1);
 
   // Message expectations.
   Future<Message> registerExecutorMessage =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks1);
+  driver.launchTasks(offers1.get()[0].id(), {task1});
 
   AWAIT_READY(registerExecutorMessage);
 
@@ -3639,8 +3560,7 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceBackward)
     .WillRepeatedly(Return());
 
   // Enable checkpointing for the framework.
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
@@ -3662,14 +3582,12 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceBackward)
 
   TaskInfo task1 = createTask(
       slaveId, Resources::parse("cpus:0.5;mem:128").get(), "sleep 1000");
-  vector<TaskInfo> tasks1;
-  tasks1.push_back(task1);
 
   // Message expectations.
   Future<Message> registerExecutorMessage =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers1.get()[0].id(), tasks1);
+  driver.launchTasks(offers1.get()[0].id(), {task1});
 
   AWAIT_READY(registerExecutorMessage);
 

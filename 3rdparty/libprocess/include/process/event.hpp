@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_EVENT_HPP__
 #define __PROCESS_EVENT_HPP__
 
@@ -97,7 +111,7 @@ private:
   // copyable.
   // Note that we are violating the "rule of three" here but it helps
   // keep the fields const.
-  MessageEvent& operator = (const MessageEvent&);
+  MessageEvent& operator=(const MessageEvent&);
 };
 
 
@@ -122,7 +136,7 @@ struct HttpEvent : Event
 private:
   // Not copyable, not assignable.
   HttpEvent(const HttpEvent&);
-  HttpEvent& operator = (const HttpEvent&);
+  HttpEvent& operator=(const HttpEvent&);
 };
 
 
@@ -153,7 +167,7 @@ struct DispatchEvent : Event
 private:
   // Not copyable, not assignable.
   DispatchEvent(const DispatchEvent&);
-  DispatchEvent& operator = (const DispatchEvent&);
+  DispatchEvent& operator=(const DispatchEvent&);
 };
 
 
@@ -173,7 +187,7 @@ private:
   // Keep ExitedEvent not assignable even though we made it copyable.
   // Note that we are violating the "rule of three" here but it helps
   // keep the fields const.
-  ExitedEvent& operator = (const ExitedEvent&);
+  ExitedEvent& operator=(const ExitedEvent&);
 };
 
 
@@ -192,7 +206,7 @@ struct TerminateEvent : Event
 private:
   // Not copyable, not assignable.
   TerminateEvent(const TerminateEvent&);
-  TerminateEvent& operator = (const TerminateEvent&);
+  TerminateEvent& operator=(const TerminateEvent&);
 };
 
 } // namespace process {

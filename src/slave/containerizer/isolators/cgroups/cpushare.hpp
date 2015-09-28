@@ -19,13 +19,19 @@
 #ifndef __CPUSHARE_ISOLATOR_HPP__
 #define __CPUSHARE_ISOLATOR_HPP__
 
-#include <string>
+#include <sys/types.h>
 
-#include <mesos/slave/isolator.hpp>
+#include <string>
+#include <vector>
+
+#include <process/future.hpp>
 
 #include <stout/hashmap.hpp>
+#include <stout/option.hpp>
 
 #include "slave/flags.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 #include "slave/containerizer/isolators/cgroups/constants.hpp"
 
@@ -37,7 +43,7 @@ namespace slave {
 // Completely Fair Scheduler (CFS).
 // - cpushare implements proportionally weighted scheduling.
 // - cfs implements hard quota based scheduling.
-class CgroupsCpushareIsolatorProcess : public mesos::slave::IsolatorProcess
+class CgroupsCpushareIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
@@ -45,21 +51,20 @@ public:
   virtual ~CgroupsCpushareIsolatorProcess();
 
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(
@@ -92,7 +97,7 @@ private:
     Option<pid_t> pid;
     Option<Resources> resources;
 
-    process::Promise<mesos::slave::Limitation> limitation;
+    process::Promise<mesos::slave::ContainerLimitation> limitation;
   };
 
   const Flags flags;

@@ -14,11 +14,16 @@
 #ifndef __STOUT_IP_HPP__
 #define __STOUT_IP_HPP__
 
+// For 'sockaddr'.
+#ifdef __WINDOWS__
+#include <Winsock2.h>
+#else
 #include <arpa/inet.h>
+#endif // __WINDOWS__
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <ifaddrs.h>
-#endif
+#endif // __linux__ || __APPLE__
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,11 +32,18 @@
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/if_types.h>
-#endif
+#endif // __APPLE__
 
+// Note: Header grouping and ordering is considered before
+// inclusion/exclusion by platform.
+// For 'inet_pton', 'inet_ntop'.
+#ifdef __WINDOWS__
+#include <Ws2tcpip.h>
+#else
 #include <netinet/in.h>
-
 #include <sys/socket.h>
+#endif // __WINDOWS__
+
 #include <sys/types.h>
 
 #include <iostream>
@@ -39,17 +51,21 @@
 #include <vector>
 
 
-#include "abort.hpp"
-#include "bits.hpp"
-#include "error.hpp"
-#include "none.hpp"
-#include "numify.hpp"
-#include "option.hpp"
-#include "result.hpp"
-#include "stringify.hpp"
-#include "strings.hpp"
-#include "try.hpp"
-#include "unreachable.hpp"
+#include <stout/abort.hpp>
+#include <stout/bits.hpp>
+#include <stout/error.hpp>
+#include <stout/none.hpp>
+#include <stout/numify.hpp>
+#include <stout/option.hpp>
+#include <stout/result.hpp>
+#include <stout/stringify.hpp>
+#include <stout/strings.hpp>
+#include <stout/try.hpp>
+#include <stout/unreachable.hpp>
+
+#ifdef __WINDOWS__
+#include <stout/windows.hpp>
+#endif // __WINDOWS__
 
 
 namespace net {
@@ -127,7 +143,7 @@ public:
     }
   }
 
-  bool operator == (const IP& that) const
+  bool operator==(const IP& that) const
   {
     if (family_ != that.family_) {
       return false;
@@ -136,12 +152,12 @@ public:
     }
   }
 
-  bool operator != (const IP& that) const
+  bool operator!=(const IP& that) const
   {
-    return !operator == (that);
+    return !(*this == that);
   }
 
-  bool operator < (const IP& that) const
+  bool operator<(const IP& that) const
   {
     if (family_ != that.family_) {
       return family_ < that.family_;
@@ -150,7 +166,7 @@ public:
     }
   }
 
-  bool operator > (const IP& that) const
+  bool operator>(const IP& that) const
   {
     if (family_ != that.family_) {
       return family_ > that.family_;
@@ -218,7 +234,7 @@ inline Try<IP> IP::create(const struct sockaddr& _storage)
 
 // Returns the string representation of the given IP using the
 // canonical dot-decimal form. For example: "10.0.0.1".
-inline std::ostream& operator << (std::ostream& stream, const IP& ip)
+inline std::ostream& operator<<(std::ostream& stream, const IP& ip)
 {
   switch (ip.family()) {
     case AF_INET: {
@@ -238,20 +254,6 @@ inline std::ostream& operator << (std::ostream& stream, const IP& ip)
     default: {
       UNREACHABLE();
     }
-  }
-}
-
-
-inline std::size_t hash_value(const IP& ip)
-{
-  size_t seed = 0;
-
-  switch (ip.family()) {
-     case AF_INET:
-       boost::hash_combine(seed, htonl(ip.in().get().s_addr));
-       return seed;
-     default:
-       UNREACHABLE();
   }
 }
 
@@ -306,14 +308,14 @@ public:
     }
   }
 
-  bool operator == (const IPNetwork& that) const
+  bool operator==(const IPNetwork& that) const
   {
     return address_ == that.address_ && netmask_ == that.netmask_;
   }
 
-  bool operator != (const IPNetwork& that) const
+  bool operator!=(const IPNetwork& that) const
   {
-    return !operator == (that);
+    return !(*this == that);
   }
 
 private:
@@ -394,7 +396,12 @@ inline Try<IPNetwork> IPNetwork::create(const IP& address, int prefix)
         return Error("Subnet prefix is larger than 32");
       }
 
-      return IPNetwork(address, IP(0xffffffff << (32 - prefix)));
+      // Avoid left-shifting by 32 bits when prefix is 0.
+      uint32_t mask = 0;
+      if (prefix > 0) {
+        mask = 0xffffffff << (32 - prefix);
+      }
+      return IPNetwork(address, IP(mask));
     }
     default: {
       UNREACHABLE();
@@ -471,9 +478,7 @@ inline Result<IPNetwork> IPNetwork::fromLinkDevice(
 
 // Returns the string representation of the given IP network using the
 // canonical dot-decimal form with prefix. For example: "10.0.0.1/8".
-inline std::ostream& operator << (
-    std::ostream& stream,
-    const IPNetwork& network)
+inline std::ostream& operator<<(std::ostream& stream, const IPNetwork& network)
 {
   stream << network.address() << "/" << network.prefix();
 
@@ -481,5 +486,30 @@ inline std::ostream& operator << (
 }
 
 } // namespace net {
+
+namespace std {
+
+template <>
+struct hash<net::IP>
+{
+  typedef size_t result_type;
+
+  typedef net::IP argument_type;
+
+  result_type operator()(const argument_type& ip) const
+  {
+    size_t seed = 0;
+
+    switch (ip.family()) {
+      case AF_INET:
+        boost::hash_combine(seed, htonl(ip.in().get().s_addr));
+        return seed;
+      default:
+        UNREACHABLE();
+    }
+  }
+};
+
+} // namespace std {
 
 #endif // __STOUT_IP_HPP__

@@ -19,15 +19,15 @@
 #ifndef __POSIX_ISOLATOR_HPP__
 #define __POSIX_ISOLATOR_HPP__
 
-#include <mesos/slave/isolator.hpp>
+#include <process/future.hpp>
 
 #include <stout/hashmap.hpp>
 
 #include <stout/os/pstree.hpp>
 
-#include <process/future.hpp>
-
 #include "slave/flags.hpp"
+
+#include "slave/containerizer/isolator.hpp"
 
 #include "usage/usage.hpp"
 
@@ -35,38 +35,37 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
-// A basic IsolatorProcess that keeps track of the pid but doesn't do any
-// resource isolation. Subclasses must implement usage() for their appropriate
-// resource(s).
-class PosixIsolatorProcess : public mesos::slave::IsolatorProcess
+// A basic MesosIsolatorProcess that keeps track of the pid but
+// doesn't do any resource isolation. Subclasses must implement
+// usage() for their appropriate resource(s).
+class PosixIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& state,
+      const std::list<mesos::slave::ContainerState>& state,
       const hashset<ContainerID>& orphans)
   {
-    foreach (const mesos::slave::ExecutorRunState& run, state) {
+    foreach (const mesos::slave::ContainerState& run, state) {
       // This should (almost) never occur: see comment in
       // PosixLauncher::recover().
-      if (pids.contains(run.id)) {
+      if (pids.contains(run.container_id())) {
         return process::Failure("Container already recovered");
       }
 
-      pids.put(run.id, run.pid);
+      pids.put(run.container_id(), run.pid());
 
-      process::Owned<process::Promise<mesos::slave::Limitation>> promise(
-          new process::Promise<mesos::slave::Limitation>());
-      promises.put(run.id, promise);
+      process::Owned<process::Promise<mesos::slave::ContainerLimitation>>
+        promise(new process::Promise<mesos::slave::ContainerLimitation>());
+      promises.put(run.container_id(), promise);
     }
 
     return Nothing();
   }
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user)
   {
     if (promises.contains(containerId)) {
@@ -74,8 +73,8 @@ public:
                               " has already been prepared");
     }
 
-    process::Owned<process::Promise<mesos::slave::Limitation>> promise(
-        new process::Promise<mesos::slave::Limitation>());
+    process::Owned<process::Promise<mesos::slave::ContainerLimitation>> promise(
+        new process::Promise<mesos::slave::ContainerLimitation>());
     promises.put(containerId, promise);
 
     return None();
@@ -94,7 +93,7 @@ public:
     return Nothing();
   }
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId)
   {
     if (!promises.contains(containerId)) {
@@ -133,9 +132,9 @@ public:
 
 protected:
   hashmap<ContainerID, pid_t> pids;
-  hashmap<
-      ContainerID,
-      process::Owned<process::Promise<mesos::slave::Limitation>>> promises;
+  hashmap<ContainerID,
+          process::Owned<process::Promise<mesos::slave::ContainerLimitation>>>
+    promises;
 };
 
 
@@ -144,10 +143,10 @@ class PosixCpuIsolatorProcess : public PosixIsolatorProcess
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags)
   {
-    process::Owned<mesos::slave::IsolatorProcess> process(
+    process::Owned<MesosIsolatorProcess> process(
         new PosixCpuIsolatorProcess());
 
-    return new mesos::slave::Isolator(process);
+    return new MesosIsolator(process);
   }
 
   virtual process::Future<ResourceStatistics> usage(
@@ -178,10 +177,10 @@ class PosixMemIsolatorProcess : public PosixIsolatorProcess
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags)
   {
-    process::Owned<mesos::slave::IsolatorProcess> process(
+    process::Owned<MesosIsolatorProcess> process(
         new PosixMemIsolatorProcess());
 
-    return new mesos::slave::Isolator(process);
+    return new MesosIsolator(process);
   }
 
   virtual process::Future<ResourceStatistics> usage(
@@ -205,7 +204,6 @@ public:
 private:
   PosixMemIsolatorProcess() {}
 };
-
 
 } // namespace slave {
 } // namespace internal {

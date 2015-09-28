@@ -11,8 +11,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef __STOUT_OS_LINUX_HPP__
-#define __STOUT_OS_LINUX_HPP__
+#ifndef __STOUT_OS_POSIX_HPP__
+#define __STOUT_OS_POSIX_HPP__
 
 // This file contains Linux-only OS utilities.
 #ifndef __linux__
@@ -28,6 +28,7 @@
 
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
+#include <stout/lambda.hpp>
 #include <stout/option.hpp>
 #include <stout/proc.hpp>
 #include <stout/result.hpp>
@@ -36,6 +37,49 @@
 #include <stout/os/process.hpp>
 
 namespace os {
+
+
+// Helper for clone() which expects an int(void*).
+static int childMain(void* _func)
+{
+  const lambda::function<int()>* func =
+    static_cast<const lambda::function<int()>*> (_func);
+
+  return (*func)();
+}
+
+
+inline pid_t clone(const lambda::function<int()>& func, int flags)
+{
+  // Stack for the child.
+  // - unsigned long long used for best alignment.
+  // - 8 MiB appears to be the default for "ulimit -s" on OSX and Linux.
+  //
+  // NOTE: We need to allocate the stack dynamically. This is because
+  // glibc's 'clone' will modify the stack passed to it, therefore the
+  // stack must NOT be shared as multiple 'clone's can be invoked
+  // simultaneously.
+  int stackSize = 8 * 1024 * 1024;
+  unsigned long long *stack =
+    new unsigned long long[stackSize/sizeof(unsigned long long)];
+
+  pid_t pid = ::clone(
+      childMain,
+      &stack[stackSize/sizeof(stack[0]) - 1],  // stack grows down.
+      flags,
+      (void*) &func);
+
+  // If CLONE_VM is not set, ::clone would create a process which runs in a
+  // separate copy of the memory space of the calling process. So we destroy the
+  // stack here to avoid memory leak. If CLONE_VM is set, ::clone would create a
+  // thread which runs in the same memory space with the calling process.
+  if (!(flags & CLONE_VM)) {
+    delete[] stack;
+  }
+
+  return pid;
+}
+
 
 inline Result<Process> process(pid_t pid)
 {
@@ -91,11 +135,11 @@ inline Result<Process> process(pid_t pid)
 }
 
 
-inline Try<std::set<pid_t> > pids()
+inline Try<std::set<pid_t>> pids()
 {
   return proc::pids();
 }
 
 } // namespace os {
 
-#endif // __STOUT_OS_LINUX_HPP__
+#endif // __STOUT_OS_POSIX_HPP__

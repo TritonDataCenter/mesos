@@ -1,3 +1,15 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License
+
 # Generated with autoscan, then modified appropriately.
 # Process this file with autoconf to produce a configure script.
 
@@ -17,6 +29,7 @@ AC_CONFIG_MACRO_DIR([m4])
 # -Wno-portability, since we require GNU Make for % patterns.
 # Removal of -Werror due warnings introduced by automake 1.14.
 AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign])
+AM_MAINTAINER_MODE([enable])
 
 # Required for linking non-POSIX libs.
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
@@ -81,6 +94,12 @@ AC_ARG_ENABLE([ssl],
                              [use ssl for libprocess communication
                              default: no]),
               [enable_ssl=yes], [])
+
+AC_ARG_ENABLE([static-unimplemented],
+              AS_HELP_STRING([--enable-static-unimplemented],
+                             [generate static assertion errors for unimplemented
+                             functions default: no]),
+              [enable_static_unimplemented=yes], [])
 
 AC_ARG_WITH([boost],
             AS_HELP_STRING([--with-boost@<:@=DIR@:>@],
@@ -161,9 +180,6 @@ AC_ARG_WITH([ssl],
             AS_HELP_STRING([--with-ssl=@<:@=DIR@:>@],
                            [specify where to locate the ssl library]),
             [], [])
-
-# There is no prefix installation of the JAR.
-AC_ARG_VAR([PROTOBUF_JAR], [full path to protobuf jar on prefixed builds])
 
 # Do some OS specific setup.
 case "${target_os}" in
@@ -525,13 +541,6 @@ if test "x$without_bundled_protobuf" = "xyes" || \
 
   if test "x$found_protobuf" = "xyes"; then
     with_bundled_protobuf=no
-    if test -z "`echo $PROTOBUF_JAR`"; then
-      PROTOBUF_JAR="${PROTOBUFPREFIX}/share/java/protobuf.jar"
-    fi
-
-    AC_CHECK_FILE([$PROTOBUF_JAR],
-                  [],
-                  [AC_MSG_ERROR([cannot find PROTOBUF_JAR=$PROTOBUF_JAR])])
 
     AC_CHECK_TOOL([PROTOCOMPILER_TEST], [protoc], [], [$PROTOBUFPREFIX/bin])
 
@@ -553,13 +562,10 @@ correct if you're already doing this.
   fi
 else
   with_bundled_protobuf=yes
-  PROTOBUF_JAR="\${MESOS_BUILD_DIR}/src/java/target/protobuf-java-2.5.0.jar"
 fi
 
 AM_CONDITIONAL([WITH_BUNDLED_PROTOBUF],
                [test "x$with_bundled_protobuf" = "xyes"])
-
-AC_SUBST([PROTOBUF_JAR])
 
 # Default to gcc toolchain (we rely on some atomic builtins for now,
 # that are also present with clang).
@@ -699,6 +705,10 @@ fi
 
 AM_CONDITIONAL([ENABLE_SSL], [test x"$enable_ssl" = "xyes"])
 
+if test "x$enable_static_unimplemented" = "xyes"; then
+  AC_DEFINE([ENABLE_STATIC_UNIMPLEMENTED], [1])
+fi
+
 
 AS_IF([test "x${ac_cv_env_CFLAGS_set}" = "x"],
       [CFLAGS="$debug_flags $optimize_flags"])
@@ -801,9 +811,7 @@ case "$host_os" in
     fi
 
     # GTEST on OSX needs its own tr1 tuple.
-    # TODO(dhamon): Update to gmock 1.7 and pass GTEST_LANG_CXX11 when
-    # in C++11 mode.
-    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1"
+    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1 -DGTEST_LANG_CXX11"
     ;;
 esac
 

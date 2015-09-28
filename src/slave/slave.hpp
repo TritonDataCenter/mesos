@@ -28,6 +28,7 @@
 
 #include <boost/circular_buffer.hpp>
 
+#include <mesos/attributes.hpp>
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 
@@ -51,7 +52,13 @@
 #include <stout/path.hpp>
 #include <stout/uuid.hpp>
 
+#include "common/protobuf_utils.hpp"
+
+#include "files/files.hpp"
+
 #include "master/detector.hpp"
+
+#include "messages/messages.hpp"
 
 #include "slave/constants.hpp"
 #include "slave/containerizer/containerizer.hpp"
@@ -61,13 +68,6 @@
 #include "slave/monitor.hpp"
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
-
-#include "common/attributes.hpp"
-#include "common/protobuf_utils.hpp"
-
-#include "files/files.hpp"
-
-#include "messages/messages.hpp"
 
 namespace mesos {
 namespace internal {
@@ -117,14 +117,13 @@ public:
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const FrameworkID& frameworkId,
-      const std::string& pid,
+      const process::UPID& pid,
       TaskInfo task);
 
   // Made 'virtual' for Slave mocking.
   virtual void _runTask(
       const process::Future<bool>& future,
       const FrameworkInfo& frameworkInfo,
-      const std::string& pid,
       const TaskInfo& task);
 
   process::Future<bool> unschedule(const std::string& path);
@@ -150,7 +149,9 @@ public:
       const ExecutorID& executorId,
       const std::string& data);
 
-  void updateFramework(const FrameworkID& frameworkId, const std::string& pid);
+  void updateFramework(
+      const FrameworkID& frameworkId,
+      const process::UPID& pid);
 
   void checkpointResources(const std::vector<Resource>& checkpointedResources);
 
@@ -259,7 +260,8 @@ public:
   // Made public for testing purposes.
   void detected(const process::Future<Option<MasterInfo>>& pid);
 
-  enum State {
+  enum State
+  {
     RECOVERING,   // Slave is doing recovery.
     DISCONNECTED, // Slave is not connected to the master.
     RUNNING,      // Slave has (re-)registered.
@@ -397,14 +399,19 @@ private:
     // desired request handler to get consistent request logging.
     static void log(const process::http::Request& request);
 
+    // /slave/api/v1/executor
+    process::Future<process::http::Response> executor(
+        const process::http::Request& request) const;
+
     // /slave/health
     process::Future<process::http::Response> health(
         const process::http::Request& request) const;
 
-    // /slave/state.json
+    // /slave/state
     process::Future<process::http::Response> state(
         const process::http::Request& request) const;
 
+    static const std::string EXECUTOR_HELP;
     static const std::string HEALTH_HELP;
     static const std::string STATE_HELP;
 
@@ -417,7 +424,7 @@ private:
   friend struct Metrics;
 
   Slave(const Slave&);              // No copying.
-  Slave& operator = (const Slave&); // No assigning.
+  Slave& operator=(const Slave&); // No assigning.
 
   // Gauge methods.
   double _frameworks_active()
@@ -570,7 +577,8 @@ struct Executor
   // Returns true if this is a command executor.
   bool isCommandExecutor() const;
 
-  enum State {
+  enum State
+  {
     REGISTERING,  // Executor is launched but not (re-)registered yet.
     RUNNING,      // Executor has (re-)registered.
     TERMINATING,  // Executor is being shutdown/killed.
@@ -622,7 +630,7 @@ struct Executor
 
 private:
   Executor(const Executor&);              // No copying.
-  Executor& operator = (const Executor&); // No assigning.
+  Executor& operator=(const Executor&); // No assigning.
 
   bool commandExecutor;
 };
@@ -634,7 +642,7 @@ struct Framework
   Framework(
       Slave* slave,
       const FrameworkInfo& info,
-      const process::UPID& pid);
+      const Option<process::UPID>& pid);
 
   ~Framework();
 
@@ -648,7 +656,8 @@ struct Framework
 
   const FrameworkID id() const { return info.id(); }
 
-  enum State {
+  enum State
+  {
     RUNNING,      // First state of a newly created framework.
     TERMINATING,  // Framework is shutting down in the cluster.
   } state;
@@ -660,7 +669,12 @@ struct Framework
 
   const FrameworkInfo info;
 
-  UPID pid;
+  // Frameworks using the scheduler driver will have a 'pid',
+  // which allows us to send executor messages directly to the
+  // driver. Frameworks using the HTTP API (in 0.24.0) will
+  // not have a 'pid', in which case executor messages are
+  // sent through the master.
+  Option<UPID> pid;
 
   // Executors with pending tasks.
   hashmap<ExecutorID, hashmap<TaskID, TaskInfo>> pending;
@@ -672,13 +686,13 @@ struct Framework
   boost::circular_buffer<process::Owned<Executor>> completedExecutors;
 private:
   Framework(const Framework&);              // No copying.
-  Framework& operator = (const Framework&); // No assigning.
+  Framework& operator=(const Framework&); // No assigning.
 };
 
 
-std::ostream& operator << (std::ostream& stream, Slave::State state);
-std::ostream& operator << (std::ostream& stream, Framework::State state);
-std::ostream& operator << (std::ostream& stream, Executor::State state);
+std::ostream& operator<<(std::ostream& stream, Slave::State state);
+std::ostream& operator<<(std::ostream& stream, Framework::State state);
+std::ostream& operator<<(std::ostream& stream, Executor::State state);
 
 } // namespace slave {
 } // namespace internal {

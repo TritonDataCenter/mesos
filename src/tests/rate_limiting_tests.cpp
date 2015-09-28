@@ -20,6 +20,8 @@
 
 #include <mesos/master/allocator.hpp>
 
+#include <mesos/scheduler/scheduler.hpp>
+
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
@@ -129,15 +131,16 @@ TEST_F(RateLimitingTest, NoRateLimiting)
   EXPECT_CALL(sched, registered(driver, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call.
+  Future<mesos::scheduler::Call> subscribeCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver->start());
 
-  AWAIT_READY(registerFrameworkMessage);
+  AWAIT_READY(subscribeCall);
   AWAIT_READY(frameworkRegisteredMessage);
 
   const process::UPID schedulerPid = frameworkRegisteredMessage.get().to;
@@ -145,7 +148,7 @@ TEST_F(RateLimitingTest, NoRateLimiting)
   // For metrics endpoint.
   Clock::advance(Milliseconds(501));
 
-  // Send a duplicate RegisterFrameworkMessage. Master sends
+  // Send a duplicate subscribe call. Master sends
   // FrameworkRegisteredMessage back after processing it.
   {
     Future<process::Message> duplicateFrameworkRegisteredMessage =
@@ -153,7 +156,7 @@ TEST_F(RateLimitingTest, NoRateLimiting)
                      master.get(),
                      _);
 
-    process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+    process::post(schedulerPid, master.get(), subscribeCall.get());
     AWAIT_READY(duplicateFrameworkRegisteredMessage);
 
     // Verify that one message is received and processed (after
@@ -163,12 +166,16 @@ TEST_F(RateLimitingTest, NoRateLimiting)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(1, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   Future<Nothing> removeFramework =
@@ -178,10 +185,10 @@ TEST_F(RateLimitingTest, NoRateLimiting)
   driver->join();
   delete driver;
 
-  // The fact that UnregisterFrameworkMessage (the 2nd message from
-  // 'sched' that reaches Master after its registration) gets
-  // processed without Clock advances proves that the framework is
-  // given unlimited rate.
+  // The fact that the teardown call (the 2nd call from the scheduler
+  // that reaches Master after its registration) gets processed
+  // without Clock advances proves that the framework is given
+  // unlimited rate.
   AWAIT_READY(removeFramework);
 
   // For metrics endpoint.
@@ -232,20 +239,21 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call.
+  Future<mesos::scheduler::Call> subscribeCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver.start());
 
-  AWAIT_READY(registerFrameworkMessage);
+  AWAIT_READY(subscribeCall);
   AWAIT_READY(frameworkRegisteredMessage);
 
   const process::UPID schedulerPid = frameworkRegisteredMessage.get().to;
 
-  // Keep sending duplicate RegisterFrameworkMessages. Master sends
+  // Keep sending duplicate subscribe call. Master sends
   // FrameworkRegisteredMessage back after processing each of them.
   {
     Future<process::Message> duplicateFrameworkRegisteredMessage =
@@ -253,7 +261,7 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
                      master.get(),
                      _);
 
-    process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+    process::post(schedulerPid, master.get(), subscribeCall.get());
 
     // The first message is not throttled because it's at the head of
     // the queue.
@@ -266,12 +274,16 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(1, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // The 2nd message is throttled for a second.
@@ -280,7 +292,7 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
                    master.get(),
                    _);
 
-  process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+  process::post(schedulerPid, master.get(), subscribeCall.get());
 
   // Advance for half a second and verify that the message is still
   // not processed.
@@ -301,8 +313,12 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
 
     // The 2nd message is received and but not processed after half
     // a second because of throttling.
-    EXPECT_EQ(2, metrics.values[messages_received].as<JSON::Number>().value);
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        2,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
     EXPECT_TRUE(duplicateFrameworkRegisteredMessage.isPending());
   }
 
@@ -320,8 +336,10 @@ TEST_F(RateLimitingTest, RateLimitingEnabled)
     "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
   EXPECT_EQ(1u, metrics.values.count(messages_processed));
 
-  EXPECT_EQ(2, metrics.values[messages_received].as<JSON::Number>().value);
-  EXPECT_EQ(2, metrics.values[messages_processed].as<JSON::Number>().value);
+  EXPECT_EQ(
+      2, metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
+  EXPECT_EQ(
+      2, metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
 
   EXPECT_EQ(DRIVER_STOPPED, driver.stop());
   EXPECT_EQ(DRIVER_STOPPED, driver.join());
@@ -367,8 +385,7 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
   // 1. Register two frameworks.
 
   // 1.1. Create the first framework.
-  FrameworkInfo frameworkInfo1; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo1.set_principal("framework1");
 
   MockScheduler sched1;
@@ -380,23 +397,22 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
   EXPECT_CALL(sched1, registered(driver1, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage
-  // for sched1.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage1 = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call for sched1.
+  Future<mesos::scheduler::Call> subscribeCall1 = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage1 = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver1->start());
 
-  AWAIT_READY(registerFrameworkMessage1);
+  AWAIT_READY(subscribeCall1);
   AWAIT_READY(frameworkRegisteredMessage1);
 
   const process::UPID sched1Pid = frameworkRegisteredMessage1.get().to;
 
   // 1.2. Create the second framework.
-  FrameworkInfo frameworkInfo2; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo2.set_principal("framework2");
 
   MockScheduler sched2;
@@ -405,22 +421,22 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
   EXPECT_CALL(sched2, registered(&driver2, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage
-  // for sched2.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage2 = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call for sched2.
+  Future<mesos::scheduler::Call> subscribeCall2 = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage2 = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver2.start());
 
-  AWAIT_READY(registerFrameworkMessage2);
+  AWAIT_READY(subscribeCall2);
   AWAIT_READY(frameworkRegisteredMessage2);
 
   const process::UPID sched2Pid = frameworkRegisteredMessage2.get().to;
 
-  // 2. Send duplicate RegisterFrameworkMessages from the two
-  // schedulers to Master.
+  // 2. Send duplicate subscribe call from the two schedulers to
+  // Master.
 
   // The first messages are not throttled because they are at the
   // head of the queue.
@@ -434,8 +450,8 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
                      master.get(),
                      sched2Pid);
 
-    process::post(sched1Pid, master.get(), registerFrameworkMessage1.get());
-    process::post(sched2Pid, master.get(), registerFrameworkMessage2.get());
+    process::post(sched1Pid, master.get(), subscribeCall1.get());
+    process::post(sched2Pid, master.get(), subscribeCall2.get());
 
     AWAIT_READY(duplicateFrameworkRegisteredMessage1);
     AWAIT_READY(duplicateFrameworkRegisteredMessage2);
@@ -452,8 +468,8 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
                      master.get(),
                      sched2Pid);
 
-    process::post(sched1Pid, master.get(), registerFrameworkMessage1.get());
-    process::post(sched2Pid, master.get(), registerFrameworkMessage2.get());
+    process::post(sched1Pid, master.get(), subscribeCall1.get());
+    process::post(sched2Pid, master.get(), subscribeCall2.get());
 
     // Settle to make sure the pending futures below are indeed due
     // to throttling.
@@ -479,19 +495,19 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
       EXPECT_EQ(
           2,
           metrics.values["frameworks/framework1/messages_received"]
-            .as<JSON::Number>().value);
+            .as<JSON::Number>().as<int64_t>());
       EXPECT_EQ(
           2,
           metrics.values["frameworks/framework2/messages_received"]
-            .as<JSON::Number>().value);
+            .as<JSON::Number>().as<int64_t>());
       EXPECT_EQ(
           1,
           metrics.values["frameworks/framework1/messages_processed"]
-            .as<JSON::Number>().value);
+            .as<JSON::Number>().as<int64_t>());
       EXPECT_EQ(
           1,
           metrics.values["frameworks/framework2/messages_processed"]
-            .as<JSON::Number>().value);
+            .as<JSON::Number>().as<int64_t>());
     }
 
     // Advance for a second so the message from framework1 (1qps)
@@ -506,11 +522,11 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
     EXPECT_EQ(
         2,
         metrics.values["frameworks/framework1/messages_processed"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
     EXPECT_EQ(
         1,
         metrics.values["frameworks/framework2/messages_processed"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
 
     // After another half a second framework2 (0.2qps)'s message is
     // processed as well.
@@ -533,19 +549,19 @@ TEST_F(RateLimitingTest, DifferentPrincipalFrameworks)
     EXPECT_EQ(
         2,
         metrics.values["frameworks/framework1/messages_received"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
     EXPECT_EQ(
         2,
         metrics.values["frameworks/framework2/messages_received"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
     EXPECT_EQ(
         2,
         metrics.values["frameworks/framework1/messages_processed"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
     EXPECT_EQ(
         2,
         metrics.values["frameworks/framework2/messages_processed"]
-          .as<JSON::Number>().value);
+          .as<JSON::Number>().as<int64_t>());
   }
 
   // 3. Remove a framework and its message counters are deleted while
@@ -619,16 +635,16 @@ TEST_F(RateLimitingTest, SamePrincipalFrameworks)
   EXPECT_CALL(sched1, registered(driver1, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage
-  // for sched1.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage1 = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call for sched1.
+  Future<mesos::scheduler::Call> subscribeCall1 = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage1 = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver1->start());
 
-  AWAIT_READY(registerFrameworkMessage1);
+  AWAIT_READY(subscribeCall1);
   AWAIT_READY(frameworkRegisteredMessage1);
 
   const process::UPID sched1Pid = frameworkRegisteredMessage1.get().to;
@@ -643,16 +659,16 @@ TEST_F(RateLimitingTest, SamePrincipalFrameworks)
   EXPECT_CALL(sched2, registered(&driver2, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage
-  // for sched2.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage2 = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call for sched2.
+  Future<mesos::scheduler::Call> subscribeCall2 = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage2 = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver2.start());
 
-  AWAIT_READY(registerFrameworkMessage2);
+  AWAIT_READY(subscribeCall2);
   AWAIT_READY(frameworkRegisteredMessage2);
 
   const process::UPID sched2Pid = frameworkRegisteredMessage2.get().to;
@@ -683,8 +699,8 @@ TEST_F(RateLimitingTest, SamePrincipalFrameworks)
                    master.get(),
                    sched2Pid);
 
-  process::post(sched1Pid, master.get(), registerFrameworkMessage1.get());
-  process::post(sched2Pid, master.get(), registerFrameworkMessage2.get());
+  process::post(sched1Pid, master.get(), subscribeCall1.get());
+  process::post(sched2Pid, master.get(), subscribeCall2.get());
 
   AWAIT_READY(duplicateFrameworkRegisteredMessage1);
 
@@ -703,12 +719,16 @@ TEST_F(RateLimitingTest, SamePrincipalFrameworks)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(2, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        2,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // Advance for another half a second to make sure throttled
@@ -724,7 +744,7 @@ TEST_F(RateLimitingTest, SamePrincipalFrameworks)
   driver1->join();
   delete driver1;
 
-  // Advance to let UnregisterFrameworkMessage come through.
+  // Advance to let the teardown call come through.
   Clock::settle();
   Clock::advance(Seconds(1));
 
@@ -787,31 +807,32 @@ TEST_F(RateLimitingTest, SchedulerFailover)
     .WillOnce(FutureArg<1>(&frameworkId));
 
   {
-    // Grab the stuff we need to replay the RegisterFrameworkMessage.
-    Future<RegisterFrameworkMessage> registerFrameworkMessage = FUTURE_PROTOBUF(
-        RegisterFrameworkMessage(), _, master.get());
+    // Grab the stuff we need to replay the subscribe call.
+    Future<mesos::scheduler::Call> subscribeCall = FUTURE_CALL(
+        mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
     Future<process::Message> frameworkRegisteredMessage = FUTURE_MESSAGE(
         Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
     driver1.start();
 
-    AWAIT_READY(registerFrameworkMessage);
+    AWAIT_READY(subscribeCall);
     AWAIT_READY(frameworkRegisteredMessage);
     AWAIT_READY(frameworkId);
 
     const process::UPID schedulerPid = frameworkRegisteredMessage.get().to;
 
-    // Send a duplicate RegisterFrameworkMessage. Master replies
-    // with a duplicate FrameworkRegisteredMessage.
+    // Send a duplicate subscribe call. Master replies with a
+    // duplicate FrameworkRegisteredMessage.
     Future<process::Message> duplicateFrameworkRegisteredMessage =
       FUTURE_MESSAGE(Eq(FrameworkRegisteredMessage().GetTypeName()),
                      master.get(),
                      _);
 
-    process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+    process::post(schedulerPid, master.get(), subscribeCall.get());
 
     // Now one message has been received and processed by Master in
-    // addition to the RegisterFrameworkMessage.
+    // addition to the subscribe call.
     AWAIT_READY(duplicateFrameworkRegisteredMessage);
 
     // Settle to make sure message_processed counters are updated.
@@ -825,12 +846,16 @@ TEST_F(RateLimitingTest, SchedulerFailover)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(1, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // 2. Now launch the second (i.e., failover) scheduler using the
@@ -839,8 +864,7 @@ TEST_F(RateLimitingTest, SchedulerFailover)
 
   MockScheduler sched2;
 
-  FrameworkInfo framework2; // Bug in gcc 4.1.*, must assign on next line.
-  framework2 = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;
   framework2.mutable_id()->MergeFrom(frameworkId.get());
 
   MesosSchedulerDriver driver2(
@@ -854,15 +878,16 @@ TEST_F(RateLimitingTest, SchedulerFailover)
   EXPECT_CALL(sched1, error(&driver1, "Framework failed over"))
     .WillOnce(FutureSatisfy(&sched1Error));
 
-  // Grab the stuff we need to replay the ReregisterFrameworkMessage.
+  // Grab the stuff we need to replay the subscribe call.
   Future<process::Message> frameworkRegisteredMessage = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
-  Future<ReregisterFrameworkMessage> reregisterFrameworkMessage =
-    FUTURE_PROTOBUF(ReregisterFrameworkMessage(), _, master.get());
+
+  Future<mesos::scheduler::Call> subscribeCall2 = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
 
   driver2.start();
 
-  AWAIT_READY(reregisterFrameworkMessage);
+  AWAIT_READY(subscribeCall2);
   AWAIT_READY(sched1Error);
   AWAIT_READY(frameworkRegisteredMessage);
 
@@ -873,9 +898,9 @@ TEST_F(RateLimitingTest, SchedulerFailover)
                    master.get(),
                    _);
 
-  // Sending a duplicate ReregisterFrameworkMessage to test the
-  // message counters with the new scheduler instance.
-  process::post(schedulerPid, master.get(), reregisterFrameworkMessage.get());
+  // Sending a duplicate subscribe call to test the message counters
+  // with the new scheduler instance.
+  process::post(schedulerPid, master.get(), subscribeCall2.get());
 
   // Settle to make sure everything not delayed is processed.
   Clock::settle();
@@ -895,12 +920,16 @@ TEST_F(RateLimitingTest, SchedulerFailover)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(2, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        2,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // Need another half a second to have it processed.
@@ -919,12 +948,16 @@ TEST_F(RateLimitingTest, SchedulerFailover)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(2, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        2,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(2, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        2,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   EXPECT_EQ(DRIVER_STOPPED, driver2.stop());
@@ -960,8 +993,7 @@ TEST_F(RateLimitingTest, CapacityReached)
 
   MockScheduler sched;
 
-  FrameworkInfo frameworkInfo; // Bug in gcc 4.1.*, must assign on next line.
-  frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
 
   // Use a long failover timeout so the master doesn't unregister the
   // framework right away when it aborts.
@@ -975,20 +1007,21 @@ TEST_F(RateLimitingTest, CapacityReached)
   EXPECT_CALL(sched, registered(driver, _, _))
     .Times(1);
 
-  // Grab the stuff we need to replay the RegisterFrameworkMessage.
-  Future<RegisterFrameworkMessage> registerFrameworkMessage = FUTURE_PROTOBUF(
-      RegisterFrameworkMessage(), _, master.get());
+  // Grab the stuff we need to replay the subscribe call.
+  Future<mesos::scheduler::Call> subscribeCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::SUBSCRIBE, _, _);
+
   Future<process::Message> frameworkRegisteredMessage = FUTURE_MESSAGE(
       Eq(FrameworkRegisteredMessage().GetTypeName()), master.get(), _);
 
   ASSERT_EQ(DRIVER_RUNNING, driver->start());
 
-  AWAIT_READY(registerFrameworkMessage);
+  AWAIT_READY(subscribeCall);
   AWAIT_READY(frameworkRegisteredMessage);
 
   const process::UPID schedulerPid = frameworkRegisteredMessage.get().to;
 
-  // Keep sending duplicate RegisterFrameworkMessages. Master sends
+  // Keep sending duplicate subscribe calls. Master sends
   // FrameworkRegisteredMessage back after processing each of them.
   {
     Future<process::Message> duplicateFrameworkRegisteredMessage =
@@ -996,7 +1029,7 @@ TEST_F(RateLimitingTest, CapacityReached)
                      master.get(),
                      _);
 
-    process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+    process::post(schedulerPid, master.get(), subscribeCall.get());
 
     // The first message is not throttled because it's at the head of
     // the queue.
@@ -1009,12 +1042,16 @@ TEST_F(RateLimitingTest, CapacityReached)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(1, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
 
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // The subsequent messages are going to be throttled.
@@ -1026,7 +1063,7 @@ TEST_F(RateLimitingTest, CapacityReached)
   // Send two messages which will be queued up. This will reach but not
   // exceed the capacity.
   for (int i = 0; i < 2; i++) {
-    process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+    process::post(schedulerPid, master.get(), subscribeCall.get());
   }
 
   // Settle to make sure no error is sent just yet.
@@ -1035,13 +1072,10 @@ TEST_F(RateLimitingTest, CapacityReached)
 
   // The 3rd message results in an immediate error.
   Future<Nothing> error;
-  EXPECT_CALL(sched, error(
-      driver,
-      "Message mesos.internal.RegisterFrameworkMessage dropped: capacity(2) "
-      "exceeded"))
+  EXPECT_CALL(sched, error(driver, _))
     .WillOnce(FutureSatisfy(&error));
 
-  process::post(schedulerPid, master.get(), registerFrameworkMessage.get());
+  process::post(schedulerPid, master.get(), subscribeCall.get());
   AWAIT_READY(frameworkErrorMessage);
 
   // Settle to make sure scheduler aborts and its
@@ -1064,12 +1098,16 @@ TEST_F(RateLimitingTest, CapacityReached)
     const string& messages_received =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
     EXPECT_EQ(1u, metrics.values.count(messages_received));
-    EXPECT_EQ(5, metrics.values[messages_received].as<JSON::Number>().value);
+    EXPECT_EQ(
+        5,
+        metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
     const string& messages_processed =
       "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
     EXPECT_EQ(1u, metrics.values.count(messages_processed));
     // Four messages not processed, two in the queue and two dropped.
-    EXPECT_EQ(1, metrics.values[messages_processed].as<JSON::Number>().value);
+    EXPECT_EQ(
+        1,
+        metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
   }
 
   // Advance three times for the two pending messages and the exited
@@ -1086,12 +1124,16 @@ TEST_F(RateLimitingTest, CapacityReached)
   const string& messages_received =
     "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_received";
   EXPECT_EQ(1u, metrics.values.count(messages_received));
-  EXPECT_EQ(5, metrics.values[messages_received].as<JSON::Number>().value);
+  EXPECT_EQ(
+      5,
+      metrics.values[messages_received].as<JSON::Number>().as<int64_t>());
   const string& messages_processed =
     "frameworks/" + DEFAULT_CREDENTIAL.principal() + "/messages_processed";
   EXPECT_EQ(1u, metrics.values.count(messages_processed));
   // Two messages are dropped.
-  EXPECT_EQ(3, metrics.values[messages_processed].as<JSON::Number>().value);
+  EXPECT_EQ(
+      3,
+      metrics.values[messages_processed].as<JSON::Number>().as<int64_t>());
 
   Shutdown();
 }

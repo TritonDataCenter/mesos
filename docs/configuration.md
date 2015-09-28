@@ -14,7 +14,7 @@ Configuration values are searched for first in the environment, then on the comm
 
 **Important Options**
 
-If you have special compilation requirements, please refer to `./configure --help` when configuring Mesos. Additionally, the documentation lists only a subset of the options. A definitive source for which flags your version of Mesos supports can be found by running the binary with the flag `--help`, for example `mesos-master --help`.
+If you have special compilation requirements, please refer to `./configure --help` when configuring Mesos. Additionally, this documentation lists only a recent snapshot of the options in Mesos. A definitive source for which flags your version of Mesos supports can be found by running the binary with the flag `--help`, for example `mesos-master --help`.
 
 ## Master and Slave Options
 
@@ -29,15 +29,17 @@ If you have special compilation requirements, please refer to `./configure --hel
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
 
   <tr>
     <td>
-      --ip=VALUE
+      --external_log_file=VALUE
     </td>
     <td>
-      IP address to listen on
-
+      Specified the externally managed log file. This file will be
+      exposed in the webui and HTTP api. This is useful when using
+      stderr logging as the log file is otherwise unknown to Mesos.
     </td>
   </tr>
   <tr>
@@ -56,7 +58,7 @@ If you have special compilation requirements, please refer to `./configure --hel
 <pre><code>{
   "disabled_endpoints" : {
     "paths" : [
-      "/files/browse.json",
+      "/files/browse",
       "/slave(0)/stats.json",
     ]
   }
@@ -73,6 +75,33 @@ If you have special compilation requirements, please refer to `./configure --hel
     </td>
   </tr>
   <tr>
+    <td>
+      --[no-]initialize_driver_logging
+    </td>
+    <td>
+      Whether to automatically initialize Google logging of scheduler
+      and/or executor drivers. (default: true)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --ip=VALUE
+    </td>
+    <td>
+      IP address to listen on; this cannot be used in conjunction
+      with --ip_discovery_command.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --ip_discovery_command=VALUE
+    </td>
+    <td>
+      Optional IP discovery command: if set, it is expected to emit
+      the IP address which Master will try to bind to.  Cannot be used
+      in conjunction with --ip.
+    </td>
+  </tr>  <tr>
     <td>
       --log_dir=VALUE
     </td>
@@ -127,6 +156,8 @@ If you have special compilation requirements, please refer to `./configure --hel
     </td>
     <td>
       Show version and exit. (default: false)
+    </td>
+  </tr>
 </table>
 
 ## Master Options
@@ -142,7 +173,27 @@ If you have special compilation requirements, please refer to `./configure --hel
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
+   <tr>
+     <td>
+      --advertise_ip=VALUE
+    </td>
+    <td>
+      IP address advertised to reach mesos master. Mesos master does not bind using this
+      IP address. However, this IP address may be used to access Mesos master.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --advertise_port=VALUE
+    </td>
+    <td>
+      Port advertised to reach mesos master (alongwith advertise_ip). Mesos master does not
+      bind using this port. However, this port (alongwith advertise_ip) may be used to
+      access Mesos master.
+    </td>
+  </tr>
   <tr>
     <td>
       --quorum=VALUE
@@ -192,6 +243,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -280,6 +332,23 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
+      --authorizers=VALUE
+    </td>
+    <td>
+      Authorizer implementation to use when authorizating actions that
+      required it. Use the default <code>local</code>, or load an alternate
+      authorizer module using <code>--modules</code>.
+      <br/>
+      Note that if the flag <code>--authorizers</code> is provided with a
+      value different than the default <code>local</code>, the ACLs passed
+      through the <code>--acls</code> flag will be ignored.
+      <br/>
+      Currently there's no support for multiple authorizers.<br/>
+      (default: <code>local</code>)
+    </td>
+  </tr>
+  <tr>
+    <td>
       --cluster=VALUE
     </td>
     <td>
@@ -316,16 +385,6 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
-      --external_log_file=VALUE
-    </td>
-    <td>
-      Specified the externally managed log file. This file will be
-      exposed in the webui and HTTP api. This is useful when using
-      stderr logging as the log file is otherwise unknown to Mesos.
-    </td>
-  </tr>
-  <tr>
-    <td>
       --framework_sorter=VALUE
     </td>
     <td>
@@ -348,9 +407,22 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       --hostname=VALUE
     </td>
     <td>
-      The hostname the master should advertise in ZooKeeper.
+      The hostname the master should advertise in ZooKeeper.<br>
       If left unset, the hostname is resolved from the IP address
-      that the master binds to.
+      that the slave binds to; unless the user explicitly prevents
+      that, using --no-hostname_lookup, in which case the IP itself
+      is used.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --[no-]hostname_lookup
+    </td>
+    <td>
+      Whether we should execute a lookup to find out the server's hostname,
+      if not explicitly set (via, e.g., `--hostname`).
+      True by default; if set to 'false' it will cause Mesos
+      to use the IP address, unless the hostname is explicitly set.
     </td>
   </tr>
   <tr>
@@ -650,6 +722,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
   <tr>
@@ -681,6 +754,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -721,6 +795,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -740,6 +815,15 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       Authenticatee implementation to use when authenticating against the
       master. Use the default <code>crammd5</code>, or
       load an alternate authenticatee module using <code>--modules</code>. (default: crammd5)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --[no-]cgroups_cpu_enable_pids_and_tids_count
+    </td>
+    <td>
+      Cgroups feature flag to enable counting of processes and threads
+      inside a container. (default: false)
     </td>
   </tr>
   <tr>
@@ -778,6 +862,15 @@ file:///path/to/file (where file contains one of the above)</code></pre>
     <td>
       Name of the root cgroup
       (default: mesos)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --systemd_runtime_directory=VALUE
+    </td>
+    <td>
+      The path to the systemd system run time directory
+      (default: /run/systemd/system)
     </td>
   </tr>
   <tr>
@@ -952,16 +1045,6 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
-      --docker_sandbox_directory=VALUE
-    </td>
-    <td>
-      The absolute path for the directory in the container where the
-      sandbox is mapped to.
-      (default: /mnt/mesos/sandbox)
-    </td>
-  </tr>
-  <tr>
-    <td>
       --docker_stop_timeout=VALUE
     </td>
     <td>
@@ -971,11 +1054,36 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
+      --sandbox_directory=VALUE
+    </td>
+    <td>
+      The absolute path for the directory in the container where the
+      sandbox is mapped to.
+      (default: /mnt/mesos/sandbox)
+    </td>
+  </tr>
+  <tr>
+    <td>
       --[no-]enforce_container_disk_quota
     </td>
     <td>
       Whether to enable disk quota enforcement for containers. This flag
       is used for the 'posix/disk' isolator. (default: false)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --executor_environment_variables
+    </td>
+    <td>
+      JSON object representing the environment variables that should be
+      passed to the executor, and thus subsequently task(s).
+      By default the executor will inherit the slave's environment variables.
+      Example:
+<pre><code>{
+  "PATH": "/bin:/usr/bin",
+  "LD_LIBRARY_PATH": "/usr/local/lib"
+}</code></pre>
     </td>
   </tr>
   <tr>
@@ -995,16 +1103,6 @@ file:///path/to/file (where file contains one of the above)</code></pre>
     <td>
       Amount of time to wait for an executor
       to shut down (e.g., 60secs, 3mins, etc) (default: 5secs)
-    </td>
-  </tr>
-  <tr>
-    <td>
-      --external_log_file=VALUE
-    </td>
-    <td>
-      Specified the externally managed log file. This file will be
-      exposed in the webui and HTTP api. This is useful when using
-      stderr logging as the log file is otherwise unknown to Mesos.
     </td>
   </tr>
   <tr>
@@ -1065,10 +1163,22 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       --hostname=VALUE
     </td>
     <td>
-      The hostname the slave should report.
-      <p/>
+      The hostname the agent node should report.<br>
       If left unset, the hostname is resolved from the IP address
-      that the slave binds to.
+      that the slave binds to; unless the user explicitly prevents
+      that, using --no-hostname_lookup, in which case the IP itself
+      is used.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --[no-]hostname_lookup
+    </td>
+    <td>
+      Whether we should execute a lookup to find out the server's hostname,
+      if not explicitly set (via, e.g., `--hostname`).
+      True by default; if set to 'false' it will cause Mesos
+      to use the IP address, unless the hostname is explicitly set.
     </td>
   </tr>
   <tr>
@@ -1085,10 +1195,30 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
+      --launcher=VALUE
+    </td>
+    <td>
+      The launcher to be used for Mesos containerizer. It could either be
+      'linux' or 'posix'. The Linux launcher is required for cgroups
+      isolation and for any isolators that require Linux namespaces such as
+      network, pid, etc. If unspecified, the slave will choose the Linux
+      launcher if it's running as root on Linux.
+    </td>
+  </tr>
+  <tr>
+    <td>
       --launcher_dir=VALUE
     </td>
     <td>
       Directory path of Mesos binaries (default: /usr/local/lib/mesos)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --image_providers=VALUE
+    </td>
+    <td>
+      Comma separated list of supported image providers, e.g., 'APPC,DOCKER'.
     </td>
   </tr>
   <tr>
@@ -1139,6 +1269,17 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
+      --oversubscribed_resources_interval=VALUE
+    </td>
+    <td>
+      The slave periodically updates the master with the current estimation
+      about the total amount of oversubscribed resources that are allocated
+      and available. The interval between updates is controlled by this flag.
+      (default: 15secs)
+    </td>
+  </tr>
+  <tr>
+    <td>
       --perf_duration=VALUE
     </td>
     <td>
@@ -1170,6 +1311,25 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       recently obtained sample is returned rather than sampling on
       demand. For this reason, perf_interval is independent of the
       resource monitoring interval (default: 1mins)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --qos_controller=VALUE
+    </td>
+    <td>
+      The name of the QoS Controller to use for oversubscription.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --qos_correction_interval_min=VALUE
+    </td>
+    <td>
+      The slave polls and carries out QoS corrections from the QoS
+      Controller based on its observed performance of running tasks.
+      The smallest interval between these corrections is controlled by
+      this flag. (default: 0secs)
     </td>
   </tr>
   <tr>
@@ -1221,6 +1381,14 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
+      --resource_estimator=VALUE
+    </td>
+    <td>
+      The name of the resource estimator to use for oversubscription.
+    </td>
+  </tr>
+  <tr>
+    <td>
       --resource_monitoring_interval=VALUE
     </td>
     <td>
@@ -1236,6 +1404,16 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       Total consumable resources per slave, in the form
       </p>
       <code>name(role):value;name(role):value...</code>.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --[no-]revocable_cpu_low_priority
+    </td>
+    <td>
+      Run containers with revocable CPU at a lower priority than
+      normal containers (non-revocable cpu). Currently only
+      supported by the cgroups/cpu isolator. (default: true)
     </td>
   </tr>
   <tr>
@@ -1314,6 +1492,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -1357,11 +1536,80 @@ file:///path/to/file (where file contains one of the above)</code></pre>
   </tr>
   <tr>
     <td>
-      --[no-]network_enable_socket_statistics
+      --[no-]network_enable_socket_statistics_summary
     </td>
     <td>
-      Whether to collect socket statistics (e.g., TCP RTT) for
-      each container. (default: false)
+      Whether to collect socket statistics summary for each container.
+      This flag is used for the 'network/port_mapping' isolator.
+      (default: false)
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --[no-]network_enable_socket_statistics_details
+    </td>
+    <td>
+      Whether to collect socket statistics details (e.g., TCP RTT) for
+      each container. This flag is used for the 'network/port_mapping'
+      isolator. (default: false)
+    </td>
+  </tr>
+</table>
+
+
+## Libprocess Options
+
+*The bundled libprocess library can be controlled with the following environment variables.*
+
+<table class="table table-striped">
+  <thead>
+    <tr>
+      <th width="30%">
+        Variable
+      </th>
+      <th>
+        Explanation
+      </th>
+    </tr>
+  </thead>
+  <tr>
+    <td>
+      LIBPROCESS_IP
+    </td>
+    <td>
+      Sets the IP address for communication to and from libprocess.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      LIBPROCESS_PORT
+    </td>
+    <td>
+      Sets the port for communication to and from libprocess.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      LIBPROCESS_ADVERTISE_IP
+    </td>
+    <td>
+      If set, this provides the IP address that will be advertised to
+      the outside world for communication to and from libprocess.
+      This is useful, for example, for containerized tasks in which
+      communication is bound locally to a non-public IP that will be
+      inaccessible to the master.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      LIBPROCESS_ADVERTISE_PORT
+    </td>
+    <td>
+      If set, this provides the port that will be advertised to the
+      outside world for communication to and from libprocess. Note that
+      this port will not actually be bound (the local LIBPROCESS_PORT
+      will be), so redirection to the local IP and port must be
+      provided separately.
     </td>
   </tr>
 </table>
@@ -1380,6 +1628,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -1510,6 +1759,7 @@ file:///path/to/file (where file contains one of the above)</code></pre>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>
@@ -1637,11 +1887,12 @@ it to find libraries and programs with nonstandard names/locations.
   <thead>
     <tr>
       <th width="30%">
-        Flag
+        Variable
       </th>
       <th>
         Explanation
       </th>
+    </tr>
   </thead>
   <tr>
     <td>

@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -24,7 +26,7 @@ config = {
     'namespace_packages': [ 'mesos' ],
     'packages': [ 'mesos', 'mesos.interface' ],
     'package_dir': { '': 'src' },
-    'install_requires': [ 'protobuf>=2.5.0,<3' ],
+    'install_requires': [ 'google-common>=0.0.1', 'protobuf>=2.5.0,<3' ],
     'license': 'Apache 2.0',
     'keywords': 'mesos',
     'classifiers': [ ]

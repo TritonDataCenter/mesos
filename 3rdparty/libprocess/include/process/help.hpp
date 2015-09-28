@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #ifndef __PROCESS_HELP_HPP__
 #define __PROCESS_HELP_HPP__
 
@@ -19,31 +33,23 @@ namespace process {
 // Constructs a Markdown based help "page" for a route with the
 // following template:
 //
-//     ### TL;DR; ###
-//     tldr
-//
 //     ### USAGE ###
 //     usage
+//
+//     ### TL;DR; ###
+//     tldr
 //
 //     ### DESCRIPTION ###
 //     description
 //
 //     references
 //
-// See the 'TLDR', 'USAGE', 'DESCRIPTION', and 'REFERENCES' helpers
+// See the 'USAGE', 'TLDR', 'DESCRIPTION', and 'REFERENCES' helpers
 // below to more easily construct your help pages.
 std::string HELP(
     std::string tldr,
-    std::string usage,
     std::string description,
     const Option<std::string>& references = None());
-
-// Helper for single-line TL;DR; that adds a newline.
-inline std::string TLDR(const std::string& tldr)
-{
-  return tldr + "\n";
-}
-
 
 // Helper for single-line usage that puts it in a blockquote as code
 // and adds a newline.
@@ -53,14 +59,21 @@ inline std::string USAGE(const std::string& usage)
 }
 
 
-template <typename ...T>
+// Helper for single-line TL;DR; that adds a newline.
+inline std::string TLDR(const std::string& tldr)
+{
+  return tldr + "\n";
+}
+
+
+template <typename... T>
 inline std::string DESCRIPTION(T&&... args)
 {
   return strings::join("\n", std::forward<T>(args)..., "\n");
 }
 
 
-template <typename ...T>
+template <typename... T>
 inline std::string REFERENCES(T&&... args)
 {
   return strings::join("\n", std::forward<T>(args)..., "\n");
@@ -104,7 +117,10 @@ private:
   // process.
   Future<http::Response> help(const http::Request& request);
 
-  std::map<std::string, std::map<std::string, std::string> > helps;
+  // Helper function to get usage path by process id and endpoint name.
+  std::string getUsagePath(const std::string& id, const std::string& name);
+
+  std::map<std::string, std::map<std::string, std::string>> helps;
 };
 
 } // namespace process {

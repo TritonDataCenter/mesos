@@ -19,25 +19,26 @@
 #ifndef __MEM_ISOLATOR_HPP__
 #define __MEM_ISOLATOR_HPP__
 
-#include <list>
+#include <sys/types.h>
 
-#include <mesos/slave/isolator.hpp>
-
+#include <process/future.hpp>
 #include <process/owned.hpp>
 
 #include <stout/hashmap.hpp>
+#include <stout/nothing.hpp>
+#include <stout/option.hpp>
 
 #include "linux/cgroups.hpp"
 
 #include "slave/flags.hpp"
 
-#include "slave/containerizer/isolators/cgroups/constants.hpp"
+#include "slave/containerizer/isolator.hpp"
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-class CgroupsMemIsolatorProcess : public mesos::slave::IsolatorProcess
+class CgroupsMemIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
@@ -45,21 +46,20 @@ public:
   virtual ~CgroupsMemIsolatorProcess();
 
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ExecutorRunState>& states,
+      const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<CommandInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
-      const Option<std::string>& rootfs,
       const Option<std::string>& user);
 
   virtual process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t pid);
 
-  virtual process::Future<mesos::slave::Limitation> watch(
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
       const ContainerID& containerId);
 
   virtual process::Future<Nothing> update(
@@ -97,7 +97,7 @@ private:
     const std::string cgroup;
     Option<pid_t> pid;
 
-    process::Promise<mesos::slave::Limitation> limitation;
+    process::Promise<mesos::slave::ContainerLimitation> limitation;
 
     // Used to cancel the OOM listening.
     process::Future<Nothing> oomNotifier;

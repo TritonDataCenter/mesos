@@ -36,7 +36,17 @@ mesos::internal::master::Flags::Flags()
       "hostname",
       "The hostname the master should advertise in ZooKeeper.\n"
       "If left unset, the hostname is resolved from the IP address\n"
-      "that the master binds to.");
+      "that the slave binds to; unless the user explicitly prevents\n"
+      "that, using --no-hostname_lookup, in which case the IP itself\n"
+      "is used.");
+
+  add(&Flags::hostname_lookup,
+      "hostname_lookup",
+      "Whether we should execute a lookup to find out the server's hostname,\n"
+      "if not explicitly set (via, e.g., `--hostname`).\n"
+      "True by default; if set to 'false' it will cause Mesos\n"
+      "to use the IP address, unless the hostname is explicitly set.",
+      true);
 
   add(&Flags::root_submissions,
       "root_submissions",
@@ -227,6 +237,9 @@ mesos::internal::master::Flags::Flags()
       "for authorization. Path could be of the form 'file:///path/to/file'\n"
       "or '/path/to/file'.\n"
       "\n"
+      "Note that if the flag --authorizers is provided with a value different\n"
+      "than '" + DEFAULT_AUTHORIZER + "', the ACLs contents will be ignored.\n"
+      "\n"
       "See the ACLs protobuf in mesos.proto for the expected format.\n"
       "\n"
       "Example:\n"
@@ -264,7 +277,7 @@ mesos::internal::master::Flags::Flags()
       "{\n"
       "  \"disabled_endpoints\" : {\n"
       "    \"paths\" : [\n"
-      "      \"/files/browse.json\",\n"
+      "      \"/files/browse\",\n"
       "      \"/slave(0)/stats.json\",\n"
       "    ]\n"
       "  }\n"
@@ -407,4 +420,19 @@ mesos::internal::master::Flags::Flags()
         }
         return None();
       });
+
+
+  add(&Flags::authorizers,
+      "authorizers",
+      "Authorizer implementation to use when authorizating actions that\n"
+      "required it.\n"
+      "Use the default '" + DEFAULT_AUTHORIZER + "', or\n"
+      "load an alternate authorizer module using --modules.\n"
+      "\n"
+      "Note that if the flag --authorizers is provided with a value different\n"
+      "than the default '" + DEFAULT_AUTHORIZER + "', the ACLs passed\n"
+      "through the --acls flag will be ignored.\n"
+      "\n"
+      "Currently there's no support for multiple authorizers.",
+      DEFAULT_AUTHORIZER);
 }

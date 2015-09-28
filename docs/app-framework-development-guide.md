@@ -15,6 +15,7 @@ You can write a framework scheduler in C, C++, Java/Scala, or Python. Your frame
 ### Scheduler API
 
 Declared in `MESOS_HOME/include/mesos/scheduler.hpp`
+
 ~~~{.cpp}
 /*
  * Empty virtual destructor (necessary to instantiate subclasses).
@@ -68,7 +69,7 @@ virtual void resourceOffers(SchedulerDriver* driver,
  * Invoked when an offer is no longer valid (e.g., the slave was
  * lost or another framework used resources in the offer). If for
  * whatever reason an offer is never rescinded (e.g., dropped
- * message, failing over framework, etc.), a framwork that attempts
+ * message, failing over framework, etc.), a framework that attempts
  * to launch tasks using an invalid offer will receive TASK_LOST
  * status updats for those tasks (see Scheduler::resourceOffers).
  */
@@ -209,6 +210,67 @@ You need to put your framework somewhere that all slaves on the cluster can get 
 
 Once you are sure that your executors are available to the mesos-slaves, you should be able to run your scheduler, which will register with the Mesos master, and start receiving resource offers!
 
+
+## Labels
+
+`Labels` can be found in the `TaskInfo`, `DiscoveryInfo` and `TaskStatus`s and
+let's framework and module writers use Labels to tag and pass unstructured
+information around Mesos. Labels are free-form key-value pairs supplied by the
+framework scheduler or label decorator hooks. Below is the protobuf definitions
+of labels:
+
+~~~{.proto}
+  optional Labels labels = 11;
+~~~
+
+~~~{.proto}
+/**
+ * Collection of labels.
+ */
+message Labels {
+    repeated Label labels = 1;
+}
+
+/**
+ * Key, value pair used to store free form user-data.
+ */
+message Label {
+  required string key = 1;
+  optional string value = 2;
+}
+~~~
+
+Labels are not interpreted by Mesos itself, but will be made available over
+master and slave state endpoints. Further more, the executor and scheduler can
+introspect labels on the TaskInfo and TaskStatus programmatically.
+Below is an example of how two label pairs (`"environment": "prod"` and
+`"bananas": "apples"`) can be fetched from the master state endpoint.
+
+
+~~~{.sh}
+$ curl http://master/state.json
+...
+{
+  "executor_id": "default",
+  "framework_id": "20150312-120017-16777343-5050-39028-0000",
+  "id": "3",
+  "labels": [
+    {
+      "key": "environment",
+      "value": "prod"
+    },
+    {
+      "key": "bananas",
+      "value": "apples"
+    }
+  ],
+  "name": "Task 3",
+  "slave_id": "20150312-115625-16777343-5050-38751-S0",
+  "state": "TASK_FINISHED",
+  ...
+},
+~~~
+
 ## Service discovery
 
 When your framework registers an executor or launches a task, it can provide additional information for service discovery. This information is stored by the Mesos master along with other imporant information such as the slave currently running the task. A service discovery system can programmatically retrieve this information in order to set up DNS entries, configure proxies, or update any consistent store used for service discovery in a Mesos cluster that runs multiple frameworks and multiple tasks.
@@ -245,6 +307,6 @@ The `name` field is a string that that provides the service discovery system wit
 
 The `environment`, `location`, and `version` fields provide first class support for common attributes used to differentiate between similar services in large deployments. The `environment` may receive values such as `PROD/QA/DEV`, the `location` field may receive values like `EAST-US/WEST-US/EUROPE/AMEA`, and the `version` field may receive values like v2.0/v0.9. The exact use of these fields is up to the service discovery system.
 
-The `ports` field allows the framework to identify the ports a task listens to and explicitly name the functionality they represent and the layer-4 protocol they use (TCP, UDP, or other). For example, a Cassandra task will define ports like `“7000,Cluster,TCP”`, `“7001,SSL,TCP”`, `“9160,Thrift,TCP”`, `“9042,Native,TCP”`, and `“7199,JMX,TCP”`. It is up to the service discovery system to use these names and protocol in appropriate ways, potentially combining them with the `name` field in DiscoveryInfo.
+The `ports` field allows the framework to identify the ports a task listens to and explicitly name the functionality they represent and the layer-4 protocol they use (TCP, UDP, or other). For example, a Cassandra task will define ports like `"7000,Cluster,TCP"`, `"7001,SSL,TCP"`, `"9160,Thrift,TCP"`, `"9042,Native,TCP"`, and `"7199,JMX,TCP"`. It is up to the service discovery system to use these names and protocol in appropriate ways, potentially combining them with the `name` field in DiscoveryInfo.
 
 The `labels` field allows a framework to pass arbitrary labels to the service discovery system in the form of key/value pairs. Note that anything passed through this field is not guaranteed to be supported moving forward. Nevertheless, this field provides extensibility. Common uses of this field will allow us to identify use cases that require first class support.

@@ -33,6 +33,7 @@
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/pid.hpp>
+#include <process/reap.hpp>
 #include <process/subprocess.hpp>
 
 #include <stout/option.hpp>
@@ -41,6 +42,7 @@
 
 #include "common/build.hpp"
 #include "common/http.hpp"
+#include "common/protobuf_utils.hpp"
 
 #include "master/flags.hpp"
 #include "master/master.hpp"
@@ -62,6 +64,8 @@
 using namespace mesos::internal::slave;
 
 using mesos::internal::master::Master;
+
+using mesos::internal::protobuf::createLabel;
 
 using process::Clock;
 using process::Future;
@@ -194,14 +198,11 @@ TEST_F(SlaveTest, ShutdownUnregisteredExecutor)
 
   task.mutable_command()->MergeFrom(command);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   // Drop the registration message from the executor to the slave.
   Future<Message> registerExecutor =
     DROP_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(registerExecutor);
 
@@ -223,7 +224,7 @@ TEST_F(SlaveTest, ShutdownUnregisteredExecutor)
 
   // Now advance time until the reaper reaps the executor.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(process::MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -278,14 +279,11 @@ TEST_F(SlaveTest, RemoveUnregisteredTerminatedExecutor)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   // Drop the registration message from the executor to the slave.
   Future<Message> registerExecutorMessage =
     DROP_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(registerExecutorMessage);
 
@@ -359,9 +357,6 @@ TEST_F(SlaveTest, CommandExecutorWithOverride)
 
   task.mutable_command()->MergeFrom(command);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   // Expect the launch and just assume it was sucessful since we'll be
   // launching the executor ourselves manually below.
   Future<Nothing> launch;
@@ -377,7 +372,7 @@ TEST_F(SlaveTest, CommandExecutorWithOverride)
     .WillOnce(DoAll(FutureSatisfy(&wait),
                     Return(promise.future())));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Once we get the launch the mesos-executor with --override.
   AWAIT_READY(launch);
@@ -509,16 +504,13 @@ TEST_F(SlaveTest, ComamndTaskWithArguments)
 
   task.mutable_command()->MergeFrom(command);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Scheduler should first receive TASK_RUNNING followed by the
   // TASK_FINISHED from the executor.
@@ -638,16 +630,13 @@ TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithoutUser)
 
   task.mutable_command()->MergeFrom(command);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Scheduler should first receive TASK_RUNNING followed by the
   // TASK_FINISHED from the executor.
@@ -671,7 +660,7 @@ TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithoutUser)
 // specified user. We use (and assume the presence) of the
 // unprivileged 'nobody' user which should be available on both Linux
 // and Mac OS X.
-TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithUser)
+TEST_F(SlaveTest, DISABLED_ROOT_RunTaskWithCommandInfoWithUser)
 {
   // TODO(nnielsen): Introduce STOUT abstraction for user verification
   // instead of flat getpwnam call.
@@ -747,14 +736,11 @@ TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithUser)
   prepareCommand.add_arguments(user.get());
   prepareTask.mutable_command()->CopyFrom(prepareCommand);
 
-  vector<TaskInfo> prepareTasks;
-  prepareTasks.push_back(prepareTask);
-
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
-  driver.launchTasks(offers.get()[0].id(), prepareTasks);
+  driver.launchTasks(offers.get()[0].id(), {prepareTask});
 
   // Scheduler should first receive TASK_RUNNING followed by the
   // TASK_FINISHED from the executor.
@@ -789,14 +775,12 @@ TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithUser)
   command.add_arguments(testUser);
 
   task.mutable_command()->CopyFrom(command);
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Scheduler should first receive TASK_RUNNING followed by the
   // TASK_FINISHED from the executor.
@@ -853,9 +837,6 @@ TEST_F(SlaveTest, IgnoreNonLeaderStatusUpdateAcknowledgement)
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<ExecutorDriver*> execDriver;
   EXPECT_CALL(exec, registered(_, _, _, _))
     .WillOnce(FutureArg<0>(&execDriver));
@@ -880,7 +861,7 @@ TEST_F(SlaveTest, IgnoreNonLeaderStatusUpdateAcknowledgement)
   Future<Nothing> _statusUpdateAcknowledgement =
     FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
 
-  schedDriver.launchTasks(offers.get()[0].id(), tasks);
+  schedDriver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(update);
   EXPECT_EQ(TASK_RUNNING, update.get().state());
@@ -953,6 +934,7 @@ TEST_F(SlaveTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("slave/executors_running"));
   EXPECT_EQ(1u, snapshot.values.count("slave/executors_terminating"));
   EXPECT_EQ(1u, snapshot.values.count("slave/executors_terminated"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/executors_preempted"));
 
   EXPECT_EQ(1u, snapshot.values.count("slave/valid_status_updates"));
   EXPECT_EQ(1u, snapshot.values.count("slave/invalid_status_updates"));
@@ -1064,7 +1046,7 @@ TEST_F(SlaveTest, StateEndpoint)
   ASSERT_SOME(slave);
 
   Future<process::http::Response> response =
-    process::http::get(slave.get(), "state.json");
+    process::http::get(slave.get(), "state");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
 
@@ -1099,7 +1081,7 @@ TEST_F(SlaveTest, StateEndpoint)
   ASSERT_TRUE(state.values["start_time"].is<JSON::Number>());
   EXPECT_EQ(
       static_cast<int>(Clock::now().secs()),
-      static_cast<int>(state.values["start_time"].as<JSON::Number>().value));
+      state.values["start_time"].as<JSON::Number>().as<int>());
 
   // TODO(bmahler): The slave must register for the 'id'
   // to be non-empty.
@@ -1161,8 +1143,6 @@ TEST_F(SlaveTest, StateEndpoint)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  const vector<TaskInfo> tasks = {task};
-
   EXPECT_CALL(exec, registered(_, _, _, _))
     .Times(1);
 
@@ -1173,12 +1153,12 @@ TEST_F(SlaveTest, StateEndpoint)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
 
-  response = http::get(slave.get(), "state.json");
+  response = http::get(slave.get(), "state");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
 
@@ -1529,7 +1509,7 @@ TEST_F(SlaveTest, PingTimeoutNoPings)
   ASSERT_SOME(master);
 
   // Block all pings to the slave.
-  DROP_MESSAGES(Eq("PING"), _, _);
+  DROP_MESSAGES(Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
@@ -1583,7 +1563,8 @@ TEST_F(SlaveTest, PingTimeoutSomePings)
   Clock::pause();
 
   // Ensure a ping reaches the slave.
-  Future<Message> ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+  Future<Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   Clock::advance(masterFlags.slave_ping_timeout);
 
@@ -1592,7 +1573,7 @@ TEST_F(SlaveTest, PingTimeoutSomePings)
   // Now block further pings from the master and advance
   // the clock to trigger a re-detection and re-registration on
   // the slave.
-  DROP_MESSAGES(Eq("PING"), _, _);
+  DROP_MESSAGES(Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   Future<Nothing> detected = FUTURE_DISPATCH(_, &Slave::detected);
 
@@ -1619,10 +1600,11 @@ TEST_F(SlaveTest, RateLimitSlaveShutdown)
 
   // Set these expectations up before we spawn the slave so that we
   // don't miss the first PING.
-  Future<Message> ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+  Future<Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   // Drop all the PONGs to simulate health check timeout.
-  DROP_MESSAGES(Eq("PONG"), _, _);
+  DROP_MESSAGES(Eq(PongSlaveMessage().GetTypeName()), _, _);
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
@@ -1652,7 +1634,7 @@ TEST_F(SlaveTest, RateLimitSlaveShutdown)
       Clock::advance(masterFlags.slave_ping_timeout);
       break;
     }
-    ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+    ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.slave_ping_timeout);
   }
 
@@ -1683,10 +1665,11 @@ TEST_F(SlaveTest, CancelSlaveShutdown)
 
   // Set these expectations up before we spawn the slave so that we
   // don't miss the first PING.
-  Future<Message> ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+  Future<Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
 
   // Drop all the PONGs to simulate health check timeout.
-  DROP_MESSAGES(Eq("PONG"), _, _);
+  DROP_MESSAGES(Eq(PongSlaveMessage().GetTypeName()), _, _);
 
   // No shutdown should occur during the test!
   EXPECT_NO_FUTURE_PROTOBUFS(ShutdownMessage(), _, _);
@@ -1717,7 +1700,7 @@ TEST_F(SlaveTest, CancelSlaveShutdown)
       Clock::advance(masterFlags.slave_ping_timeout);
       break;
     }
-    ping = FUTURE_MESSAGE(Eq("PING"), _, _);
+    ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.slave_ping_timeout);
   }
 
@@ -1789,9 +1772,6 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   EXPECT_CALL(exec, registered(_, _, _, _))
     .Times(0);
 
@@ -1816,12 +1796,12 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
   // later, tie reaching the critical moment when to kill the task to
   // a future.
   Future<Nothing> _runTask;
-  EXPECT_CALL(slave, _runTask(_, _, _, _))
+  EXPECT_CALL(slave, _runTask(_, _, _))
     .WillOnce(DoAll(FutureSatisfy(&_runTask),
                     SaveArg<0>(&future),
                     SaveArg<1>(&frameworkInfo)));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(_runTask);
 
@@ -1841,8 +1821,7 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
   driver.killTask(task.task_id());
 
   AWAIT_READY(killTask);
-  slave.unmocked__runTask(
-      future, frameworkInfo, master.get(), task);
+  slave.unmocked__runTask(future, frameworkInfo, task);
 
   AWAIT_READY(removeFramework);
 
@@ -2074,20 +2053,9 @@ TEST_F(SlaveTest, TaskLabels)
   // Add three labels to the task (two of which share the same key).
   Labels* labels = task.mutable_labels();
 
-  Label* label1 = labels->add_labels();
-  label1->set_key("foo");
-  label1->set_value("bar");
-
-  Label* label2 = labels->add_labels();
-  label2->set_key("bar");
-  label2->set_value("baz");
-
-  Label* label3 = labels->add_labels();
-  label3->set_key("bar");
-  label3->set_value("qux");
-
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
+  labels->add_labels()->CopyFrom(createLabel("foo", "bar"));
+  labels->add_labels()->CopyFrom(createLabel("bar", "baz"));
+  labels->add_labels()->CopyFrom(createLabel("bar", "qux"));
 
   EXPECT_CALL(exec, registered(_, _, _, _))
     .Times(1);
@@ -2105,14 +2073,116 @@ TEST_F(SlaveTest, TaskLabels)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
 
   AWAIT_READY(update);
 
-  // Verify label key and value in slave state.json.
+  // Verify label key and value in slave state endpoint.
+  Future<process::http::Response> response =
+    process::http::get(slave.get(), "state");
+  AWAIT_READY(response);
+
+  EXPECT_SOME_EQ(
+      "application/json",
+      response.get().headers.get("Content-Type"));
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+  ASSERT_SOME(parse);
+
+  Result<JSON::Array> find = parse.get().find<JSON::Array>(
+      "frameworks[0].executors[0].tasks[0].labels");
+  EXPECT_SOME(find);
+
+  JSON::Array labelsObject = find.get();
+
+  // Verify the contents of 'foo:bar', 'bar:baz', and 'bar:qux' pairs.
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("foo", "bar"))),
+      labelsObject.values[0]);
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("bar", "baz"))),
+      labelsObject.values[1]);
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("bar", "qux"))),
+      labelsObject.values[2]);
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+}
+
+
+// This test verifies that TaskStatus label values are exposed over
+// the slave state endpoint.
+TEST_F(SlaveTest, TaskStatusLabels)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+
+  Try<PID<Slave>> slave = StartSlave(&exec);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
+
+  ExecutorDriver* execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(SaveArg<0>(&execDriver));
+
+  Future<TaskInfo> execTask;
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(FutureArg<1>(&execTask));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(execTask);
+
+  // Now send TASK_RUNNING update.
+  TaskStatus runningStatus;
+  runningStatus.mutable_task_id()->MergeFrom(execTask.get().task_id());
+  runningStatus.set_state(TASK_RUNNING);
+
+  // Add three labels to the task (two of which share the same key).
+  Labels* labels = runningStatus.mutable_labels();
+
+  labels->add_labels()->CopyFrom(createLabel("foo", "bar"));
+  labels->add_labels()->CopyFrom(createLabel("bar", "baz"));
+  labels->add_labels()->CopyFrom(createLabel("bar", "qux"));
+
+  execDriver->sendStatusUpdate(runningStatus);
+
+  AWAIT_READY(status);
+
+  // Verify label key and value in master state.json.
   Future<process::http::Response> response =
     process::http::get(slave.get(), "state.json");
   AWAIT_READY(response);
@@ -2124,43 +2194,110 @@ TEST_F(SlaveTest, TaskLabels)
   Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
   ASSERT_SOME(parse);
 
-  Result<JSON::Array> labelsObject = parse.get().find<JSON::Array>(
-      "frameworks[0].executors[0].tasks[0].labels");
-  EXPECT_SOME(labelsObject);
+  Result<JSON::Array> find = parse.get().find<JSON::Array>(
+      "frameworks[0].executors[0].tasks[0].statuses[0].labels");
+  EXPECT_SOME(find);
 
-  JSON::Array labelsObject_ = labelsObject.get();
+  JSON::Array labelsObject = find.get();
 
-  // Verify the content of 'foo:bar' pair.
-  Try<JSON::Value> expected = JSON::parse(
-      "{"
-      "  \"key\":\"foo\","
-      "  \"value\":\"bar\""
-      "}");
+  // Verify the contents of 'foo:bar', 'bar:baz', and 'bar:qux' pairs.
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("foo", "bar"))),
+      labelsObject.values[0]);
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("bar", "baz"))),
+      labelsObject.values[1]);
+  EXPECT_EQ(
+      JSON::Value(JSON::Protobuf(createLabel("bar", "qux"))),
+      labelsObject.values[2]);
 
-  ASSERT_SOME(expected);
-  EXPECT_EQ(labelsObject_.values[0], expected.get());
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+}
 
 
-  // Verify the content of 'bar:baz' pair.
-  expected = JSON::parse(
-      "{"
-      "  \"key\":\"bar\","
-      "  \"value\":\"baz\""
-      "}");
+// This test verifies that TaskStatus::container_status an is exposed over
+// the slave state endpoint.
+TEST_F(SlaveTest, TaskStatusContainerStatus)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
 
-  ASSERT_SOME(expected);
-  EXPECT_EQ(labelsObject_.values[1], expected.get());
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
 
+  Try<PID<Slave>> slave = StartSlave(&exec);
+  ASSERT_SOME(slave);
 
-  // Verify the content of 'bar:qux' pair.
-  expected = JSON::parse(
-      "{"
-      "  \"key\":\"bar\","
-      "  \"value\":\"qux\""
-      "}");
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
 
-  ASSERT_SOME(expected);
-  EXPECT_EQ(labelsObject_.values[2], expected.get());
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
+
+  ExecutorDriver* execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(SaveArg<0>(&execDriver));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+
+  const string slaveIPAddress = stringify(slave.get().address.ip);
+
+  // Validate that the Slave has passed in its IP address in
+  // TaskStatus.container_status.network_infos[0].ip_address.
+  EXPECT_TRUE(status.get().has_container_status());
+  EXPECT_EQ(1, status.get().container_status().network_infos().size());
+  EXPECT_TRUE(
+      status.get().container_status().network_infos(0).has_ip_address());
+  EXPECT_EQ(
+      slaveIPAddress,
+      status.get().container_status().network_infos(0).ip_address());
+
+  // Now do the same validation with state endpoint.
+  Future<process::http::Response> response =
+    process::http::get(slave.get(), "state.json");
+  AWAIT_READY(response);
+
+  EXPECT_SOME_EQ(
+      "application/json",
+      response.get().headers.get("Content-Type"));
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+  ASSERT_SOME(parse);
+
+  // Validate that the IP address passed in by the Slave is available at the
+  // state endpoint.
+  ASSERT_SOME_EQ(
+      slaveIPAddress,
+      parse.get().find<JSON::String>(
+          "frameworks[0].executors[0].tasks[0].statuses[0]"
+          ".container_status.network_infos[0].ip_address"));
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -2222,16 +2359,13 @@ TEST_F(SlaveTest, ExecutorEnvironmentVariables)
 
   task.mutable_command()->MergeFrom(command);
 
-  vector<TaskInfo> tasks;
-  tasks.push_back(task);
-
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
-  driver.launchTasks(offers.get()[0].id(), tasks);
+  driver.launchTasks(offers.get()[0].id(), {task});
 
   // Scheduler should first receive TASK_RUNNING followed by the
   // TASK_FINISHED from the executor.
@@ -2245,6 +2379,384 @@ TEST_F(SlaveTest, ExecutorEnvironmentVariables)
   driver.join();
 
   Shutdown();
+}
+
+
+// This test verifies that the slave should properly show total slave
+// resources.
+TEST_F(SlaveTest, TotalSlaveResourcesIncludedInUsage)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  TestContainerizer containerizer;
+  StandaloneMasterDetector detector(master.get());
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.resources = "cpus:2;mem:1024;disk:1024;ports:[31000-32000]";
+
+  MockSlave slave(flags, &detector, &containerizer);
+  spawn(slave);
+
+  Clock::pause();
+
+  // Wait for slave to be initialized.
+  Clock::settle();
+
+  // We expect that the slave will return ResourceUsage with
+  // total resources reported.
+  Future<ResourceUsage> usage = slave.usage();
+
+  AWAIT_READY(usage);
+
+  // Total resources should match the resources from flag.resources.
+  EXPECT_EQ(Resources(usage.get().total()),
+            Resources::parse(flags.resources.get()).get());
+
+  terminate(slave);
+  wait(slave);
+
+  Shutdown();
+}
+
+
+// This test verifies that the slave should properly show total slave
+// resources with checkpointed resources applied.
+TEST_F(SlaveTest, CheckpointedResourcesIncludedInUsage)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  TestContainerizer containerizer;
+  StandaloneMasterDetector detector(master.get());
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.resources = "cpus:2;cpus(role1):3;mem:1024;disk:1024;disk(role1):64;"
+                    "ports:[31000-32000]";
+
+  MockSlave slave(flags, &detector, &containerizer);
+  spawn(slave);
+
+  Clock::pause();
+
+  // Wait for slave to be initialized.
+  Clock::settle();
+
+  Resource dynamicReservation = Resources::parse("cpus", "1", "role1").get();
+  dynamicReservation.mutable_reservation()->CopyFrom(
+      createReservationInfo("principal"));
+
+  Resource persistentVolume = createPersistentVolume(
+      Megabytes(64),
+      "role1",
+      "id1",
+      "path1");
+
+  vector<Resource> checkpointedResources =
+    {dynamicReservation, persistentVolume};
+
+  // Add checkpointed resources.
+  slave.checkpointResources(checkpointedResources);
+
+  // We expect that the slave will return ResourceUsage with
+  // total and checkpointed slave resources reported.
+  Future<ResourceUsage> usage = slave.usage();
+
+  AWAIT_READY(usage);
+
+  Resources usageTotalResources(usage.get().total());
+
+  // Reported total field should contain persistent volumes and dynamic
+  // reservations.
+  EXPECT_EQ(usageTotalResources.persistentVolumes(), persistentVolume);
+  EXPECT_TRUE(usageTotalResources.contains(dynamicReservation));
+
+  terminate(slave);
+  wait(slave);
+
+  Shutdown();
+}
+
+
+// Ensures that the slave correctly handles a framework without
+// a pid, which will be the case for HTTP schedulers. In
+// particular, executor messages should be routed through the
+// master.
+TEST_F(SlaveTest, HTTPScheduler)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  Try<PID<Slave>> slave = StartSlave(&exec);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 2, 1024, "*"))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  // Capture the run task message to unset the framework pid.
+  Future<RunTaskMessage> runTaskMessage =
+    DROP_PROTOBUF(RunTaskMessage(), master.get(), slave.get());
+
+  driver.start();
+
+  AWAIT_READY(runTaskMessage);
+
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendFrameworkMessage("message"));
+
+  // The slave should forward the message through the master.
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage1 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), slave.get(), master.get());
+
+  // The master should then forward the message to the framework.
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage2 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), master.get(), _);
+
+  Future<Nothing> frameworkMessage;
+  EXPECT_CALL(sched, frameworkMessage(&driver, _, _, "message"))
+    .WillOnce(FutureSatisfy(&frameworkMessage));
+
+  // Clear the pid in the run task message so that the slave
+  // thinks this is an HTTP scheduler.
+  RunTaskMessage spoofed = runTaskMessage.get();
+  spoofed.set_pid("");
+
+  process::post(master.get(), slave.get(), spoofed);
+
+  AWAIT_READY(executorToFrameworkMessage1);
+  AWAIT_READY(executorToFrameworkMessage2);
+
+  AWAIT_READY(frameworkMessage);
+
+  // Must call shutdown before the mock executor gets deallocated.
+  Shutdown();
+}
+
+
+// Ensures that the slave correctly handles a framework upgrading
+// to HTTP (going from having a pid, to not having a pid). In
+// particular, executor messages should be routed through the
+// master.
+TEST_F(SlaveTest, HTTPSchedulerLiveUpgrade)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  Try<PID<Slave>> slave = StartSlave(&exec);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 2, 1024, "*"))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  ExecutorDriver* execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(SaveArg<0>(&execDriver));
+
+  Future<Nothing> launchTask;
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(FutureSatisfy(&launchTask));
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+  AWAIT_READY(launchTask);
+
+  // Now spoof a live upgrade of the framework by updating
+  // the framework information to have an empty pid.
+  UpdateFrameworkMessage updateFrameworkMessage;
+  updateFrameworkMessage.mutable_framework_id()->CopyFrom(frameworkId.get());
+  updateFrameworkMessage.set_pid("");
+
+  process::post(master.get(), slave.get(), updateFrameworkMessage);
+
+  // Send a message from the executor; the slave should forward
+  // the message through the master.
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage1 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), slave.get(), master.get());
+
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage2 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), master.get(), _);
+
+  Future<Nothing> frameworkMessage;
+  EXPECT_CALL(sched, frameworkMessage(&driver, _, _, "message"))
+    .WillOnce(FutureSatisfy(&frameworkMessage));
+
+  execDriver->sendFrameworkMessage("message");
+
+  AWAIT_READY(executorToFrameworkMessage1);
+  AWAIT_READY(executorToFrameworkMessage2);
+
+  AWAIT_READY(frameworkMessage);
+
+  // Must call shutdown before the mock executor gets deallocated.
+  Shutdown();
+}
+
+
+// Ensures that the slave can restart when there is an empty
+// framework pid. Executor messages should go through the
+// master (instead of directly to the scheduler!).
+TEST_F(SlaveTest, HTTPSchedulerSlaveRestart)
+{
+  Try<PID<Master> > master = this->StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = this->CreateSlaveFlags();
+
+  Fetcher fetcher;
+
+  Try<slave::MesosContainerizer*> containerizer =
+    slave::MesosContainerizer::create(flags, true, &fetcher);
+
+  ASSERT_SOME(containerizer);
+
+  Try<PID<Slave> > slave = this->StartSlave(containerizer.get(), flags);
+  ASSERT_SOME(slave);
+
+  // Enable checkpointing for the framework.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_checkpoint(true);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  FrameworkID frameworkId;
+  EXPECT_CALL(sched, registered(_, _, _))
+    .WillOnce(SaveArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());      // Ignore subsequent offers.
+
+  driver.start();
+
+  // Capture the executor information.
+  Future<Message> registerExecutorMessage =
+    FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  SlaveID slaveId = offers.get()[0].slave_id();
+
+  // Capture the run task so that we can unset the framework pid.
+  Future<RunTaskMessage> runTaskMessage =
+    DROP_PROTOBUF(RunTaskMessage(), master.get(), slave.get());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status))
+    .WillRepeatedly(Return());       // Ignore subsequent updates.
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 1000");
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(runTaskMessage);
+
+  // Clear the pid in the run task message so that the slave
+  // thinks this is an HTTP scheduler.
+  RunTaskMessage spoofedRunTaskMessage = runTaskMessage.get();
+  spoofedRunTaskMessage.set_pid("");
+
+  process::post(master.get(), slave.get(), spoofedRunTaskMessage);
+
+  AWAIT_READY(registerExecutorMessage);
+
+  RegisterExecutorMessage registerExecutor;
+  registerExecutor.ParseFromString(registerExecutorMessage.get().body);
+  ExecutorID executorId = registerExecutor.executor_id();
+  UPID executorPid = registerExecutorMessage.get().from;
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+
+  // Restart the slave.
+  Stop(slave.get());
+
+  Try<slave::MesosContainerizer*> containerizer2 =
+    slave::MesosContainerizer::create(flags, true, &fetcher);
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+     FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
+
+  // Capture this so that we can unset the framework pid.
+  Future<UpdateFrameworkMessage> updateFrameworkMessage =
+     DROP_PROTOBUF(UpdateFrameworkMessage(), _, _);
+
+  // Ensure that there will be no reregistration retries from the
+  // slave resulting in another UpdateFrameworkMessage from master.
+  Clock::pause();
+
+  slave = StartSlave(containerizer2.get(), flags);
+  ASSERT_SOME(slave);
+
+  Clock::settle();
+  Clock::resume();
+
+  AWAIT_READY(slaveReregisteredMessage);
+  AWAIT_READY(updateFrameworkMessage);
+
+  // Make sure the slave sees an empty framework pid after recovery.
+  UpdateFrameworkMessage spoofedUpdateFrameworkMessage =
+    updateFrameworkMessage.get();
+  spoofedUpdateFrameworkMessage.set_pid("");
+
+  process::post(master.get(), slave.get(), spoofedUpdateFrameworkMessage);
+
+  // Spoof a message from the executor, to ensure the slave
+  // sends it through the master (instead of directly to the
+  // scheduler driver!).
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage1 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), slave.get(), master.get());
+
+  Future<ExecutorToFrameworkMessage> executorToFrameworkMessage2 =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), master.get(), _);
+
+  Future<Nothing> frameworkMessage;
+  EXPECT_CALL(sched, frameworkMessage(&driver, _, _, "message"))
+    .WillOnce(FutureSatisfy(&frameworkMessage));
+
+  ExecutorToFrameworkMessage executorToFrameworkMessage;
+  executorToFrameworkMessage.mutable_slave_id()->CopyFrom(slaveId);
+  executorToFrameworkMessage.mutable_framework_id()->CopyFrom(frameworkId);
+  executorToFrameworkMessage.mutable_executor_id()->CopyFrom(executorId);
+  executorToFrameworkMessage.set_data("message");
+
+  process::post(executorPid, slave.get(), executorToFrameworkMessage);
+
+  AWAIT_READY(executorToFrameworkMessage1);
+  AWAIT_READY(executorToFrameworkMessage2);
+  AWAIT_READY(frameworkMessage);
+
+  driver.stop();
+  driver.join();
+
+  this->Shutdown();
+
+  delete containerizer.get();
 }
 
 } // namespace tests {

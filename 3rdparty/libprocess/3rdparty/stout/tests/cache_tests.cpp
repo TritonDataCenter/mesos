@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <string>
 
 #include <gtest/gtest.h>
@@ -6,7 +20,7 @@
 #include <stout/gtest.hpp>
 
 
-TEST(Cache, Insert)
+TEST(CacheTest, Insert)
 {
   Cache<int, std::string> cache(1);
   EXPECT_EQ(0, cache.size());
@@ -16,7 +30,7 @@ TEST(Cache, Insert)
 }
 
 
-TEST(Cache, Update)
+TEST(CacheTest, Update)
 {
   Cache<int, std::string> cache(1);
   cache.put(1, "a");
@@ -26,7 +40,7 @@ TEST(Cache, Update)
 }
 
 
-TEST(Cache, Erase)
+TEST(CacheTest, Erase)
 {
   Cache<int, std::string> cache(2);
   cache.put(1, "a");
@@ -45,7 +59,7 @@ TEST(Cache, Erase)
 }
 
 
-TEST(Cache, LRUEviction)
+TEST(CacheTest, LRUEviction)
 {
   Cache<int, std::string> cache(2);
   cache.put(1, "a");

@@ -25,8 +25,12 @@
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
+
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
+
+#include <mesos/authorizer/authorizer.hpp>
 
 #include <mesos/master/allocator.hpp>
 
@@ -46,14 +50,14 @@
 #include <stout/bytes.hpp>
 #include <stout/foreach.hpp>
 #include <stout/gtest.hpp>
+#include <stout/json.hpp>
 #include <stout/lambda.hpp>
 #include <stout/none.hpp>
 #include <stout/option.hpp>
+#include <stout/os.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 #include <stout/uuid.hpp>
-
-#include "authorizer/authorizer.hpp"
 
 #include "messages/messages.hpp" // For google::protobuf::Message.
 
@@ -65,6 +69,8 @@
 #include "slave/slave.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
+#include "slave/containerizer/docker.hpp"
+#include "slave/containerizer/fetcher.hpp"
 
 #include "slave/containerizer/mesos/containerizer.hpp"
 
@@ -79,6 +85,7 @@
 using ::testing::_;
 using ::testing::An;
 using ::testing::DoDefault;
+using ::testing::Invoke;
 using ::testing::Return;
 
 namespace mesos {
@@ -269,7 +276,7 @@ private:
   hashset<std::string> subsystems;
 };
 #else
-template<>
+template <>
 class ContainerizerTest<slave::MesosContainerizer> : public MesosTest
 {
 protected:
@@ -305,6 +312,18 @@ public:
     server = NULL;
   }
 
+  virtual void SetUp()
+  {
+    MesosTest::SetUp();
+    server->startNetwork();
+  }
+
+  virtual void TearDown()
+  {
+    server->shutdownNetwork();
+    MesosTest::TearDown();
+  }
+
 protected:
   MesosZooKeeperTest() : MesosTest(url) {}
 
@@ -334,6 +353,13 @@ protected:
         executor; })
 
 
+#define DEFAULT_V1_EXECUTOR_INFO                                        \
+     ({ v1::ExecutorInfo executor;                                      \
+        executor.mutable_executor_id()->set_value("default");           \
+        executor.mutable_command()->set_value("exit 1");                \
+        executor; })
+
+
 #define CREATE_EXECUTOR_INFO(executorId, command)                       \
       ({ ExecutorInfo executor;                                         \
         executor.mutable_executor_id()->set_value(executorId);          \
@@ -348,15 +374,35 @@ protected:
         credential; })
 
 
+#define DEFAULT_V1_CREDENTIAL                                          \
+     ({ v1::Credential credential;                                     \
+        credential.set_principal("test-principal");                    \
+        credential.set_secret("test-secret");                          \
+        credential; })
+
+
 #define DEFAULT_FRAMEWORK_INFO                                          \
      ({ FrameworkInfo framework;                                        \
         framework.set_name("default");                                  \
+        framework.set_user(os::user().get());                           \
+        framework.set_principal(DEFAULT_CREDENTIAL.principal());        \
+        framework; })
+
+
+#define DEFAULT_V1_FRAMEWORK_INFO                                       \
+     ({ v1::FrameworkInfo framework;                                    \
+        framework.set_name("default");                                  \
+        framework.set_user(os::user().get());                           \
         framework.set_principal(DEFAULT_CREDENTIAL.principal());        \
         framework; })
 
 
 #define DEFAULT_EXECUTOR_ID           \
       DEFAULT_EXECUTOR_INFO.executor_id()
+
+
+#define DEFAULT_V1_EXECUTOR_ID         \
+      DEFAULT_V1_EXECUTOR_INFO.executor_id()
 
 
 #define DEFAULT_CONTAINER_ID                                          \
@@ -371,6 +417,8 @@ protected:
      commandInfo; })
 
 
+// TODO(jieyu): Consider making it a function to support more
+// overloads (e.g., createVolumeFromHost, createVolumeFromImage).
 #define CREATE_VOLUME(containerPath, hostPath, mode)                  \
       ({ Volume volume;                                               \
          volume.set_container_path(containerPath);                    \
@@ -810,26 +858,24 @@ public:
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const FrameworkID& frameworkId,
-      const std::string& pid,
+      const process::UPID& pid,
       TaskInfo task));
 
   void unmocked_runTask(
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const FrameworkID& frameworkId,
-      const std::string& pid,
+      const process::UPID& pid,
       TaskInfo task);
 
-  MOCK_METHOD4(_runTask, void(
+  MOCK_METHOD3(_runTask, void(
       const process::Future<bool>& future,
       const FrameworkInfo& frameworkInfo,
-      const std::string& pid,
       const TaskInfo& task));
 
   void unmocked__runTask(
       const process::Future<bool>& future,
       const FrameworkInfo& frameworkInfo,
-      const std::string& pid,
       const TaskInfo& task);
 
   MOCK_METHOD3(killTask, void(
@@ -917,6 +963,267 @@ public:
 };
 
 
+// Definition of a mock Docker to be used in tests with gmock.
+class MockDocker : public Docker
+{
+public:
+  MockDocker(
+      const std::string& path,
+      const std::string &socket)
+    : Docker(path, socket)
+  {
+    EXPECT_CALL(*this, pull(_, _, _))
+      .WillRepeatedly(Invoke(this, &MockDocker::_pull));
+
+    EXPECT_CALL(*this, stop(_, _, _))
+      .WillRepeatedly(Invoke(this, &MockDocker::_stop));
+
+    EXPECT_CALL(*this, run(_, _, _, _, _, _, _, _, _))
+      .WillRepeatedly(Invoke(this, &MockDocker::_run));
+
+    EXPECT_CALL(*this, inspect(_, _))
+      .WillRepeatedly(Invoke(this, &MockDocker::_inspect));
+  }
+
+  MOCK_CONST_METHOD9(
+      run,
+      process::Future<Nothing>(
+          const mesos::ContainerInfo&,
+          const mesos::CommandInfo&,
+          const std::string&,
+          const std::string&,
+          const std::string&,
+          const Option<mesos::Resources>&,
+          const Option<std::map<std::string, std::string>>&,
+          const Option<std::string>&,
+          const Option<std::string>&));
+
+  MOCK_CONST_METHOD3(
+      pull,
+      process::Future<Docker::Image>(
+          const std::string&,
+          const std::string&,
+          bool));
+
+  MOCK_CONST_METHOD3(
+      stop,
+      process::Future<Nothing>(
+          const std::string&,
+          const Duration&,
+          bool));
+
+  MOCK_CONST_METHOD2(
+      inspect,
+      process::Future<Docker::Container>(
+          const std::string&,
+          const Option<Duration>&));
+
+  process::Future<Nothing> _run(
+      const mesos::ContainerInfo& containerInfo,
+      const mesos::CommandInfo& commandInfo,
+      const std::string& name,
+      const std::string& sandboxDirectory,
+      const std::string& mappedDirectory,
+      const Option<mesos::Resources>& resources,
+      const Option<std::map<std::string, std::string>>& env,
+      const Option<std::string>& stdoutPath,
+      const Option<std::string>& stderrPath) const
+  {
+    return Docker::run(
+        containerInfo,
+        commandInfo,
+        name,
+        sandboxDirectory,
+        mappedDirectory,
+        resources,
+        env,
+        stdoutPath,
+        stderrPath);
+  }
+
+  process::Future<Docker::Image> _pull(
+      const std::string& directory,
+      const std::string& image,
+      bool force) const
+  {
+    return Docker::pull(directory, image, force);
+  }
+
+  process::Future<Nothing> _stop(
+      const std::string& containerName,
+      const Duration& timeout,
+      bool remove) const
+  {
+    return Docker::stop(containerName, timeout, remove);
+  }
+
+  process::Future<Docker::Container> _inspect(
+      const std::string& containerName,
+      const Option<Duration>& retryInterval)
+  {
+    return Docker::inspect(containerName, retryInterval);
+  }
+};
+
+
+// Definition of a mock DockerContainerizer to be used in tests with gmock.
+class MockDockerContainerizer : public slave::DockerContainerizer {
+public:
+  MockDockerContainerizer(
+      const slave::Flags& flags,
+      slave::Fetcher* fetcher,
+      process::Shared<Docker> docker)
+    : slave::DockerContainerizer(flags, fetcher, docker)
+  {
+    initialize();
+  }
+
+  MockDockerContainerizer(
+      const process::Owned<slave::DockerContainerizerProcess>& process)
+    : slave::DockerContainerizer(process)
+  {
+    initialize();
+  }
+
+  void initialize()
+  {
+    // NOTE: See TestContainerizer::setup for why we use
+    // 'EXPECT_CALL' and 'WillRepeatedly' here instead of
+    // 'ON_CALL' and 'WillByDefault'.
+    EXPECT_CALL(*this, launch(_, _, _, _, _, _, _))
+      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_launchExecutor));
+
+    EXPECT_CALL(*this, launch(_, _, _, _, _, _, _, _))
+      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_launch));
+
+    EXPECT_CALL(*this, update(_, _))
+      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_update));
+  }
+
+  MOCK_METHOD7(
+      launch,
+      process::Future<bool>(
+          const ContainerID&,
+          const ExecutorInfo&,
+          const std::string&,
+          const Option<std::string>&,
+          const SlaveID&,
+          const process::PID<slave::Slave>&,
+          bool checkpoint));
+
+  MOCK_METHOD8(
+      launch,
+      process::Future<bool>(
+          const ContainerID&,
+          const TaskInfo&,
+          const ExecutorInfo&,
+          const std::string&,
+          const Option<std::string>&,
+          const SlaveID&,
+          const process::PID<slave::Slave>&,
+          bool checkpoint));
+
+  MOCK_METHOD2(
+      update,
+      process::Future<Nothing>(
+          const ContainerID&,
+          const Resources&));
+
+  // Default 'launch' implementation (necessary because we can't just
+  // use &slave::DockerContainerizer::launch with 'Invoke').
+  process::Future<bool> _launch(
+      const ContainerID& containerId,
+      const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId,
+      const slave::PID<slave::Slave>& slavePid,
+      bool checkpoint)
+  {
+    return slave::DockerContainerizer::launch(
+        containerId,
+        taskInfo,
+        executorInfo,
+        directory,
+        user,
+        slaveId,
+        slavePid,
+        checkpoint);
+  }
+
+  process::Future<bool> _launchExecutor(
+      const ContainerID& containerId,
+      const ExecutorInfo& executorInfo,
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId,
+      const slave::PID<slave::Slave>& slavePid,
+      bool checkpoint)
+  {
+    return slave::DockerContainerizer::launch(
+        containerId,
+        executorInfo,
+        directory,
+        user,
+        slaveId,
+        slavePid,
+        checkpoint);
+  }
+
+  process::Future<Nothing> _update(
+      const ContainerID& containerId,
+      const Resources& resources)
+  {
+    return slave::DockerContainerizer::update(
+        containerId,
+        resources);
+  }
+};
+
+
+// Definition of a mock DockerContainerizerProcess to be used in tests
+// with gmock.
+class MockDockerContainerizerProcess : public slave::DockerContainerizerProcess
+{
+public:
+  MockDockerContainerizerProcess(
+      const slave::Flags& flags,
+      slave::Fetcher* fetcher,
+      const process::Shared<Docker>& docker)
+    : slave::DockerContainerizerProcess(flags, fetcher, docker)
+  {
+    EXPECT_CALL(*this, fetch(_, _))
+      .WillRepeatedly(Invoke(this, &MockDockerContainerizerProcess::_fetch));
+
+    EXPECT_CALL(*this, pull(_))
+      .WillRepeatedly(Invoke(this, &MockDockerContainerizerProcess::_pull));
+  }
+
+  MOCK_METHOD2(
+      fetch,
+      process::Future<Nothing>(
+          const ContainerID& containerId,
+          const SlaveID& slaveId));
+
+  MOCK_METHOD1(
+      pull,
+      process::Future<Nothing>(const ContainerID& containerId));
+
+  process::Future<Nothing> _fetch(
+      const ContainerID& containerId,
+      const SlaveID& slaveId)
+  {
+    return slave::DockerContainerizerProcess::fetch(containerId, slaveId);
+  }
+
+  process::Future<Nothing> _pull(const ContainerID& containerId)
+  {
+    return slave::DockerContainerizerProcess::pull(containerId);
+  }
+};
+
+
 // Definition of a MockAuthozier that can be used in tests with gmock.
 class MockAuthorizer : public Authorizer
 {
@@ -934,8 +1241,13 @@ public:
 
     EXPECT_CALL(*this, authorize(An<const mesos::ACL::ShutdownFramework&>()))
       .WillRepeatedly(Return(true));
+
+    EXPECT_CALL(*this, initialize(An<const Option<ACLs>&>()))
+      .WillRepeatedly(Return(Nothing()));
   }
 
+  MOCK_METHOD1(
+      initialize, Try<Nothing>(const Option<ACLs>& acls));
   MOCK_METHOD1(
       authorize, process::Future<bool>(const ACL::RegisterFramework& request));
   MOCK_METHOD1(
@@ -953,7 +1265,7 @@ public:
 
 ACTION_P(InvokeInitialize, allocator)
 {
-  allocator->real->initialize(arg0, arg1, arg2);
+  allocator->real->initialize(arg0, arg1, arg2, arg3);
 }
 
 
@@ -989,7 +1301,7 @@ ACTION_P(InvokeUpdateFramework, allocator)
 
 ACTION_P(InvokeAddSlave, allocator)
 {
-  allocator->real->addSlave(arg0, arg1, arg2, arg3);
+  allocator->real->addSlave(arg0, arg1, arg2, arg3, arg4);
 }
 
 
@@ -1035,6 +1347,30 @@ ACTION_P(InvokeUpdateAllocation, allocator)
 }
 
 
+ACTION_P(InvokeUpdateResources, allocator)
+{
+  return allocator->real->updateAvailable(arg0, arg1);
+}
+
+
+ACTION_P(InvokeUpdateUnavailability, allocator)
+{
+  return allocator->real->updateUnavailability(arg0, arg1);
+}
+
+
+ACTION_P(InvokeUpdateInverseOffer, allocator)
+{
+  return allocator->real->updateInverseOffer(arg0, arg1, arg2, arg3, arg4);
+}
+
+
+ACTION_P(InvokeGetInverseOfferStatuses, allocator)
+{
+  return allocator->real->getInverseOfferStatuses();
+}
+
+
 ACTION_P(InvokeRecoverResources, allocator)
 {
   allocator->real->recoverResources(arg0, arg1, arg2, arg3);
@@ -1047,6 +1383,12 @@ ACTION_P2(InvokeRecoverResourcesWithFilters, allocator, timeout)
   filters.set_refuse_seconds(timeout);
 
   allocator->real->recoverResources(arg0, arg1, arg2, filters);
+}
+
+
+ACTION_P(InvokeSuppressOffers, allocator)
+{
+  allocator->real->suppressOffers(arg0);
 }
 
 
@@ -1083,9 +1425,9 @@ public:
     // to get the best of both worlds: the ability to use 'DoDefault'
     // and no warnings when expectations are not explicit.
 
-    ON_CALL(*this, initialize(_, _, _))
+    ON_CALL(*this, initialize(_, _, _, _))
       .WillByDefault(InvokeInitialize(this));
-    EXPECT_CALL(*this, initialize(_, _, _))
+    EXPECT_CALL(*this, initialize(_, _, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, addFramework(_, _, _))
@@ -1113,9 +1455,9 @@ public:
     EXPECT_CALL(*this, updateFramework(_, _))
       .WillRepeatedly(DoDefault());
 
-    ON_CALL(*this, addSlave(_, _, _, _))
+    ON_CALL(*this, addSlave(_, _, _, _, _))
       .WillByDefault(InvokeAddSlave(this));
-    EXPECT_CALL(*this, addSlave(_, _, _, _))
+    EXPECT_CALL(*this, addSlave(_, _, _, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, removeSlave(_))
@@ -1153,6 +1495,26 @@ public:
     EXPECT_CALL(*this, updateAllocation(_, _, _))
       .WillRepeatedly(DoDefault());
 
+    ON_CALL(*this, updateAvailable(_, _))
+      .WillByDefault(InvokeUpdateResources(this));
+    EXPECT_CALL(*this, updateAvailable(_, _))
+      .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, updateUnavailability(_, _))
+      .WillByDefault(InvokeUpdateUnavailability(this));
+    EXPECT_CALL(*this, updateUnavailability(_, _))
+      .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, updateInverseOffer(_, _, _, _, _))
+      .WillByDefault(InvokeUpdateInverseOffer(this));
+    EXPECT_CALL(*this, updateInverseOffer(_, _, _, _, _))
+      .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, getInverseOfferStatuses())
+      .WillByDefault(InvokeGetInverseOfferStatuses(this));
+    EXPECT_CALL(*this, getInverseOfferStatuses())
+      .WillRepeatedly(DoDefault());
+
     ON_CALL(*this, recoverResources(_, _, _, _))
       .WillByDefault(InvokeRecoverResources(this));
     EXPECT_CALL(*this, recoverResources(_, _, _, _))
@@ -1162,15 +1524,23 @@ public:
       .WillByDefault(InvokeReviveOffers(this));
     EXPECT_CALL(*this, reviveOffers(_))
       .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, suppressOffers(_))
+      .WillByDefault(InvokeSuppressOffers(this));
+    EXPECT_CALL(*this, suppressOffers(_))
+      .WillRepeatedly(DoDefault());
   }
 
   virtual ~TestAllocator() {}
 
-  MOCK_METHOD3(initialize, void(
+  MOCK_METHOD4(initialize, void(
       const Duration&,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, Resources>&)>&,
+      const lambda::function<
+          void(const FrameworkID&,
+               const hashmap<SlaveID, UnavailableResources>&)>&,
       const hashmap<std::string, mesos::master::RoleInfo>&));
 
   MOCK_METHOD3(addFramework, void(
@@ -1191,9 +1561,10 @@ public:
       const FrameworkID&,
       const FrameworkInfo&));
 
-  MOCK_METHOD4(addSlave, void(
+  MOCK_METHOD5(addSlave, void(
       const SlaveID&,
       const SlaveInfo&,
+      const Option<Unavailability>&,
       const Resources&,
       const hashmap<FrameworkID, Resources>&));
 
@@ -1222,6 +1593,26 @@ public:
       const SlaveID&,
       const std::vector<Offer::Operation>&));
 
+  MOCK_METHOD2(updateAvailable, process::Future<Nothing>(
+      const SlaveID&,
+      const std::vector<Offer::Operation>&));
+
+  MOCK_METHOD2(updateUnavailability, void(
+      const SlaveID&,
+      const Option<Unavailability>&));
+
+  MOCK_METHOD5(updateInverseOffer, void(
+      const SlaveID&,
+      const FrameworkID&,
+      const Option<UnavailableResources>&,
+      const Option<mesos::master::InverseOfferStatus>&,
+      const Option<Filters>&));
+
+  MOCK_METHOD0(getInverseOfferStatuses, process::Future<
+      hashmap<SlaveID, hashmap<
+          FrameworkID,
+          mesos::master::InverseOfferStatus>>>());
+
   MOCK_METHOD4(recoverResources, void(
       const FrameworkID&,
       const SlaveID&,
@@ -1229,6 +1620,8 @@ public:
       const Option<Filters>& filters));
 
   MOCK_METHOD1(reviveOffers, void(const FrameworkID&));
+
+  MOCK_METHOD1(suppressOffers, void(const FrameworkID&));
 
   process::Owned<mesos::master::allocator::Allocator> real;
 };
@@ -1289,7 +1682,6 @@ const ::testing::Matcher<const std::vector<Offer>& > OfferEq(int cpus, int mem)
 }
 
 
-// Definition of the SendStatusUpdateFromTask action to be used with gmock.
 ACTION_P(SendStatusUpdateFromTask, state)
 {
   TaskStatus status;
@@ -1299,13 +1691,18 @@ ACTION_P(SendStatusUpdateFromTask, state)
 }
 
 
-// Definition of the SendStatusUpdateFromTaskID action to be used with gmock.
 ACTION_P(SendStatusUpdateFromTaskID, state)
 {
   TaskStatus status;
   status.mutable_task_id()->MergeFrom(arg1);
   status.set_state(state);
   arg0->sendStatusUpdate(status);
+}
+
+
+ACTION_P(SendFrameworkMessage, data)
+{
+  arg0->sendFrameworkMessage(data);
 }
 
 
@@ -1324,6 +1721,39 @@ ACTION_P(SendStatusUpdateFromTaskID, state)
 #define EXPECT_NO_FUTURE_PROTOBUFS(message, from, to)              \
   ExpectNoFutureProtobufs(message, from, to)
 
+
+// These are specialized versions of {FUTURE,DROP}_PROTOBUF that
+// capture a scheduler/executor Call protobuf of the given 'type'.
+// Note that we name methods as '*ProtobufUnion()' because these could
+// be reused for macros that capture any protobufs that are described
+// using the standard protocol buffer "union" trick (e.g.,
+// FUTURE_EVENT to capture scheduler::Event), see
+// https://developers.google.com/protocol-buffers/docs/techniques#union.
+
+#define FUTURE_CALL(message, unionType, from, to)              \
+  FutureUnionProtobuf(message, unionType, from, to)
+
+
+#define DROP_CALL(message, unionType, from, to)                \
+  FutureUnionProtobuf(message, unionType, from, to, true)
+
+
+#define DROP_CALLS(message, unionType, from, to)               \
+  DropUnionProtobufs(message, unionType, from, to)
+
+
+#define EXPECT_NO_FUTURE_CALLS(message, unionType, from, to)   \
+  ExpectNoFutureUnionProtobufs(message, unionType, from, to)
+
+
+#define FUTURE_CALL_MESSAGE(message, unionType, from, to)          \
+  process::FutureUnionMessage(message, unionType, from, to)
+
+
+#define DROP_CALL_MESSAGE(message, unionType, from, to)            \
+  process::FutureUnionMessage(message, unionType, from, to, true)
+
+
 // Forward declaration.
 template <typename T>
 T _FutureProtobuf(const process::Message& message);
@@ -1337,6 +1767,18 @@ process::Future<T> FutureProtobuf(T t, From from, To to, bool drop = false)
 
   return process::FutureMessage(testing::Eq(t.GetTypeName()), from, to, drop)
     .then(lambda::bind(&_FutureProtobuf<T>, lambda::_1));
+}
+
+
+template <typename Message, typename UnionType, typename From, typename To>
+process::Future<Message> FutureUnionProtobuf(
+    Message message, UnionType unionType, From from, To to, bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  return process::FutureUnionMessage(message, unionType, from, to, drop)
+    .then(lambda::bind(&_FutureProtobuf<Message>, lambda::_1));
 }
 
 
@@ -1359,6 +1801,16 @@ void DropProtobufs(T t, From from, To to)
 }
 
 
+template <typename Message, typename UnionType, typename From, typename To>
+void DropUnionProtobufs(Message message, UnionType unionType, From from, To to)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  process::DropUnionMessages(message, unionType, from, to);
+}
+
+
 template <typename T, typename From, typename To>
 void ExpectNoFutureProtobufs(T t, From from, To to)
 {
@@ -1366,6 +1818,17 @@ void ExpectNoFutureProtobufs(T t, From from, To to)
   { google::protobuf::Message* m = &t; (void) m; }
 
   process::ExpectNoFutureMessages(testing::Eq(t.GetTypeName()), from, to);
+}
+
+
+template <typename Message, typename UnionType, typename From, typename To>
+void ExpectNoFutureUnionProtobufs(
+    Message message, UnionType unionType, From from, To to)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  process::ExpectNoFutureUnionMessages(message, unionType, from, to);
 }
 
 

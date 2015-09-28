@@ -18,7 +18,7 @@ ACLOCAL_AMFLAGS = -I m4
 
 AUTOMAKE_OPTIONS = foreign
 
-SUBDIRS = . 3rdparty src ec2
+SUBDIRS = . 3rdparty src
 
 EXTRA_DIST =
 
@@ -30,6 +30,7 @@ pkgconfig_DATA = mesos.pc
 # Since we generate several files in src/ with config.status, make
 # sure they're regenerated before we recurse into the src directory.
 all-recursive: src/python/setup.py			\
+	src/python/cli/setup.py				\
 	src/python/interface/setup.py			\
 	src/python/native/setup.py			\
 	src/java/mesos.pom

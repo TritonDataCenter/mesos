@@ -15,14 +15,20 @@
 #define __STOUT_FORMAT_HPP__
 
 #include <stdarg.h> // For 'va_list', 'va_start', 'va_end'.
-#include <stdio.h> // For 'vasprintf'.
+
+// For 'vasprintf'.
+#ifdef __WINDOWS__
+#include <stout/windows/format.hpp>
+#else
+#include <stdio.h>
+#endif // __WINDOWS__
 
 #include <string>
 #include <type_traits> // For 'is_pod'.
 
-#include "error.hpp"
-#include "stringify.hpp"
-#include "try.hpp"
+#include <stout/error.hpp>
+#include <stout/stringify.hpp>
+#include <stout/try.hpp>
 
 
 // The 'strings::format' functions produces strings based on the
@@ -49,8 +55,8 @@ struct stringify;
 } // namespace internal {
 
 
-template <typename ...T>
-Try<std::string> format(const std::string& s, const T& ...t)
+template <typename... T>
+Try<std::string> format(const std::string& s, const T&... t)
 {
   return internal::format(
       s,
@@ -73,6 +79,10 @@ inline Try<std::string> format(const std::string& fmt, va_list args)
 }
 
 
+// NOTE: 'fmt' cannot be 'const std::string&' because passing an
+// argument of reference type as the second argument of 'va_start'
+// results in undefined behavior.
+// Refer to http://stackoverflow.com/a/222314 for further details.
 inline Try<std::string> format(const std::string fmt, ...)
 {
   va_list args;

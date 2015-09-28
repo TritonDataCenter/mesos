@@ -19,7 +19,11 @@
 #ifndef __MESOS_HOOK_HPP__
 #define __MESOS_HOOK_HPP__
 
+#include <map>
+#include <string>
+
 #include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
 
 #include <stout/none.hpp>
 #include <stout/nothing.hpp>
@@ -51,11 +55,22 @@ public:
   // labels overwrite the existing labels on the task info.
   virtual Result<Labels> slaveRunTaskLabelDecorator(
       const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
       const FrameworkInfo& frameworkInfo,
       const SlaveInfo& slaveInfo)
   {
     return None();
   }
+
+
+  // This hook is called when an Agent is removed i.e. deemed lost by the
+  // master. The hook is invoked after all frameworks have been informed about
+  // the loss.
+  virtual Try<Nothing> masterSlaveLostHook(const SlaveInfo& slaveInfo)
+  {
+    return Nothing();
+  }
+
 
   // This environment decorator hook is called from within slave when
   // launching a new executor. A module implementing the hook creates
@@ -70,6 +85,23 @@ public:
     return None();
   }
 
+  // This hook is called from within slave before docker is launched.
+  // A typical module implementing the hook will perform some settings
+  // as required.
+  virtual Try<Nothing> slavePreLaunchDockerHook(
+      const ContainerInfo& containerInfo,
+      const CommandInfo& commandInfo,
+      const Option<TaskInfo>& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& name,
+      const std::string& sandboxDirectory,
+      const std::string& mappedDirectory,
+      const Option<Resources>& resources,
+      const Option<std::map<std::string, std::string>>& env)
+  {
+    return Nothing();
+  }
+
   // This hook is called from within slave when an executor is being
   // removed. A typical module implementing the hook will perform some
   // cleanup as required.
@@ -78,6 +110,18 @@ public:
       const ExecutorInfo& executorInfo)
   {
     return Nothing();
+  }
+
+  // This hook is called from within slave when it receives a status update from
+  // the executor. A module implementing the hook creates and returns a
+  // TaskStatus with a set of labels and container_status. These labels and
+  // container status overwrite the existing labels on the TaskStatus. Remaining
+  // fields from the returned TaskStatus are discarded.
+  virtual Result<TaskStatus> slaveTaskStatusDecorator(
+      const FrameworkID& frameworkId,
+      const TaskStatus& status)
+  {
+    return None();
   }
 };
 

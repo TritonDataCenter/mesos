@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <signal.h>
 #include <unistd.h>
 
@@ -29,7 +43,7 @@ using testing::DoDefault;
 
 // This test checks that we can reap a non-child process, in terms
 // of receiving the termination notification.
-TEST(Reap, NonChildProcess)
+TEST(ReapTest, NonChildProcess)
 {
   // The child process creates a grandchild and then exits. The
   // grandchild sleeps for 10 seconds. The process tree looks like:
@@ -62,7 +76,7 @@ TEST(Reap, NonChildProcess)
 
   // Now advance time until the Reaper reaps the grandchild.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -76,7 +90,7 @@ TEST(Reap, NonChildProcess)
 
   // Now advance time until the child is reaped.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -92,7 +106,7 @@ TEST(Reap, NonChildProcess)
 
 // This test checks that the we can reap a child process and obtain
 // the correct exit status.
-TEST(Reap, ChildProcess)
+TEST(ReapTest, ChildProcess)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -113,7 +127,7 @@ TEST(Reap, ChildProcess)
 
   // Now advance time until the reaper reaps the child.
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(MAX_REAP_INTERVAL());
     Clock::settle();
   }
 
@@ -130,7 +144,7 @@ TEST(Reap, ChildProcess)
 
 
 // Check that we can reap a child process that is already exited.
-TEST(Reap, TerminatedChildProcess)
+TEST(ReapTest, TerminatedChildProcess)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -162,7 +176,7 @@ TEST(Reap, TerminatedChildProcess)
   // Advance time until the reaper sends the notification.
   Clock::pause();
   while (status.isPending()) {
-    Clock::advance(Seconds(1));
+    Clock::advance(MAX_REAP_INTERVAL());
     Clock::settle();
   }
 

@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <event2/buffer.h>
 #include <event2/bufferevent_ssl.h>
 #include <event2/event.h>
@@ -141,7 +155,7 @@ void LibeventSSLSocketImpl::initialize()
 }
 
 
-void LibeventSSLSocketImpl::shutdown()
+Try<Nothing> LibeventSSLSocketImpl::shutdown()
 {
   // Nothing to do if this socket was never initialized.
   synchronized (lock) {
@@ -152,7 +166,8 @@ void LibeventSSLSocketImpl::shutdown()
       CHECK(recv_request.get() == NULL);
       CHECK(send_request.get() == NULL);
 
-      return;
+      errno = ENOTCONN;
+      return ErrnoError();
     }
   }
 
@@ -186,6 +201,8 @@ void LibeventSSLSocketImpl::shutdown()
         }
       },
       DISALLOW_SHORT_CIRCUIT);
+
+  return Nothing();
 }
 
 
@@ -437,13 +454,15 @@ Future<Nothing> LibeventSSLSocketImpl::connect(const Address& address)
   }
 
   // Construct the bufferevent in the connecting state.
+  // We set 'BEV_OPT_DEFER_CALLBACKS' to avoid calling the
+  // 'event_callback' before 'bufferevent_socket_connect' returns.
   CHECK(bev == NULL);
   bev = bufferevent_openssl_socket_new(
       base,
       get(),
       ssl,
       BUFFEREVENT_SSL_CONNECTING,
-      BEV_OPT_THREADSAFE);
+      BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS);
 
   if (bev == NULL) {
     // We need to free 'ssl' here because the bev won't clean it up
@@ -503,7 +522,7 @@ Future<Nothing> LibeventSSLSocketImpl::connect(const Address& address)
           if (bufferevent_socket_connect(
                   self->bev,
                   reinterpret_cast<sockaddr*>(&addr),
-                  sizeof(addr)) < 0) {
+                  address.size()) < 0) {
             SSL* ssl = bufferevent_openssl_get_ssl(CHECK_NOTNULL(self->bev));
             SSL_free(ssl);
             bufferevent_free(self->bev);
@@ -780,8 +799,12 @@ Try<Nothing> LibeventSSLSocketImpl::listen(int backlog)
 
 Future<Socket> LibeventSSLSocketImpl::accept()
 {
+  // We explicitly specify the return type to avoid a type deduction
+  // issue in some versions of clang. See MESOS-2943.
   return accept_queue.get()
-    .then([](const Future<Socket>& future) { return future; });
+    .then([](const Future<Socket>& future) -> Future<Socket> {
+      return future;
+    });
 }
 
 

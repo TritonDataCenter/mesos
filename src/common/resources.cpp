@@ -46,7 +46,7 @@ namespace mesos {
 // Helper functions.
 /////////////////////////////////////////////////
 
-bool operator == (
+bool operator==(
     const Resource::ReservationInfo& left,
     const Resource::ReservationInfo& right)
 {
@@ -54,7 +54,7 @@ bool operator == (
 }
 
 
-bool operator != (
+bool operator!=(
     const Resource::ReservationInfo& left,
     const Resource::ReservationInfo& right)
 {
@@ -62,9 +62,7 @@ bool operator != (
 }
 
 
-bool operator == (
-    const Resource::DiskInfo& left,
-    const Resource::DiskInfo& right)
+bool operator==(const Resource::DiskInfo& left, const Resource::DiskInfo& right)
 {
   // NOTE: We ignore 'volume' inside DiskInfo when doing comparison
   // because it describes how this resource will be used which has
@@ -83,15 +81,13 @@ bool operator == (
 }
 
 
-bool operator != (
-    const Resource::DiskInfo& left,
-    const Resource::DiskInfo& right)
+bool operator!=(const Resource::DiskInfo& left, const Resource::DiskInfo& right)
 {
   return !(left == right);
 }
 
 
-bool operator == (const Resource& left, const Resource& right)
+bool operator==(const Resource& left, const Resource& right)
 {
   if (left.name() != right.name() ||
       left.type() != right.type() ||
@@ -134,11 +130,13 @@ bool operator == (const Resource& left, const Resource& right)
 }
 
 
-bool operator != (const Resource& left, const Resource& right)
+bool operator!=(const Resource& left, const Resource& right)
 {
   return !(left == right);
 }
 
+
+namespace internal {
 
 // Tests if we can add two Resource objects together resulting in one
 // valid Resource object. For example, two Resource objects with
@@ -256,8 +254,10 @@ static bool contains(const Resource& left, const Resource& right)
   }
 }
 
+} // namespace internal {
 
-Resource& operator += (Resource& left, const Resource& right)
+
+Resource& operator+=(Resource& left, const Resource& right)
 {
   if (left.type() == Value::SCALAR) {
     *left.mutable_scalar() += right.scalar();
@@ -271,7 +271,7 @@ Resource& operator += (Resource& left, const Resource& right)
 }
 
 
-Resource operator + (const Resource& left, const Resource& right)
+Resource operator+(const Resource& left, const Resource& right)
 {
   Resource result = left;
   result += right;
@@ -279,7 +279,7 @@ Resource operator + (const Resource& left, const Resource& right)
 }
 
 
-Resource& operator -= (Resource& left, const Resource& right)
+Resource& operator-=(Resource& left, const Resource& right)
 {
   if (left.type() == Value::SCALAR) {
     *left.mutable_scalar() -= right.scalar();
@@ -293,7 +293,7 @@ Resource& operator -= (Resource& left, const Resource& right)
 }
 
 
-Resource operator - (const Resource& left, const Resource& right)
+Resource operator-(const Resource& left, const Resource& right)
 {
   Resource result = left;
   result -= right;
@@ -599,7 +599,7 @@ bool Resources::contains(const Resource& that) const
 {
   // NOTE: We must validate 'that' because invalid resources can lead
   // to false positives here (e.g., "cpus:-1" will return true). This
-  // is because mesos::contains assumes resources are valid.
+  // is because 'contains' assumes resources are valid.
   return validate(that).isNone() && _contains(that);
 }
 
@@ -960,7 +960,7 @@ Resources Resources::scalars() const
 set<string> Resources::names() const
 {
   set<string> result;
-  foreach(const Resource& resource, resources) {
+  foreach (const Resource& resource, resources) {
     result.insert(resource.name());
   }
 
@@ -971,7 +971,7 @@ set<string> Resources::names() const
 map<string, Value_Type> Resources::types() const
 {
   map<string, Value_Type> result;
-  foreach(const Resource& resource, resources) {
+  foreach (const Resource& resource, resources) {
     result[resource.name()] = resource.type();
   }
 
@@ -1037,7 +1037,7 @@ Option<Value::Ranges> Resources::ephemeral_ports() const
 bool Resources::_contains(const Resource& that) const
 {
   foreach (const Resource& resource, resources) {
-    if (mesos::contains(resource, that)) {
+    if (internal::contains(resource, that)) {
       return true;
     }
   }
@@ -1051,25 +1051,25 @@ bool Resources::_contains(const Resource& that) const
 /////////////////////////////////////////////////
 
 
-Resources::operator const google::protobuf::RepeatedPtrField<Resource>& () const
+Resources::operator const google::protobuf::RepeatedPtrField<Resource>&() const
 {
   return resources;
 }
 
 
-bool Resources::operator == (const Resources& that) const
+bool Resources::operator==(const Resources& that) const
 {
   return this->contains(that) && that.contains(*this);
 }
 
 
-bool Resources::operator != (const Resources& that) const
+bool Resources::operator!=(const Resources& that) const
 {
   return !(*this == that);
 }
 
 
-Resources Resources::operator + (const Resource& that) const
+Resources Resources::operator+(const Resource& that) const
 {
   Resources result = *this;
   result += that;
@@ -1077,7 +1077,7 @@ Resources Resources::operator + (const Resource& that) const
 }
 
 
-Resources Resources::operator + (const Resources& that) const
+Resources Resources::operator+(const Resources& that) const
 {
   Resources result = *this;
   result += that;
@@ -1085,12 +1085,12 @@ Resources Resources::operator + (const Resources& that) const
 }
 
 
-Resources& Resources::operator += (const Resource& that)
+Resources& Resources::operator+=(const Resource& that)
 {
   if (validate(that).isNone() && !isEmpty(that)) {
     bool found = false;
     foreach (Resource& resource, resources) {
-      if (addable(resource, that)) {
+      if (internal::addable(resource, that)) {
         resource += that;
         found = true;
         break;
@@ -1107,7 +1107,7 @@ Resources& Resources::operator += (const Resource& that)
 }
 
 
-Resources& Resources::operator += (const Resources& that)
+Resources& Resources::operator+=(const Resources& that)
 {
   foreach (const Resource& resource, that.resources) {
     *this += resource;
@@ -1117,7 +1117,7 @@ Resources& Resources::operator += (const Resources& that)
 }
 
 
-Resources Resources::operator - (const Resource& that) const
+Resources Resources::operator-(const Resource& that) const
 {
   Resources result = *this;
   result -= that;
@@ -1125,7 +1125,7 @@ Resources Resources::operator - (const Resource& that) const
 }
 
 
-Resources Resources::operator - (const Resources& that) const
+Resources Resources::operator-(const Resources& that) const
 {
   Resources result = *this;
   result -= that;
@@ -1133,13 +1133,13 @@ Resources Resources::operator - (const Resources& that) const
 }
 
 
-Resources& Resources::operator -= (const Resource& that)
+Resources& Resources::operator-=(const Resource& that)
 {
   if (validate(that).isNone() && !isEmpty(that)) {
     for (int i = 0; i < resources.size(); i++) {
       Resource* resource = resources.Mutable(i);
 
-      if (subtractable(*resource, that)) {
+      if (internal::subtractable(*resource, that)) {
         *resource -= that;
 
         // Remove the resource if it becomes invalid or zero. We need
@@ -1158,7 +1158,7 @@ Resources& Resources::operator -= (const Resource& that)
 }
 
 
-Resources& Resources::operator -= (const Resources& that)
+Resources& Resources::operator-=(const Resources& that)
 {
   foreach (const Resource& resource, that.resources) {
     *this -= resource;
@@ -1168,7 +1168,8 @@ Resources& Resources::operator -= (const Resources& that)
 }
 
 
-ostream& operator << (ostream& stream, const Volume& volume) {
+ostream& operator<<(ostream& stream, const Volume& volume)
+{
   string volumeConfig = volume.container_path();
 
   if (volume.has_host_path()) {
@@ -1191,7 +1192,8 @@ ostream& operator << (ostream& stream, const Volume& volume) {
 }
 
 
-ostream& operator << (ostream& stream, const Resource::DiskInfo& disk) {
+ostream& operator<<(ostream& stream, const Resource::DiskInfo& disk)
+{
   if (disk.has_persistence()) {
     stream << disk.persistence().id();
   }
@@ -1204,7 +1206,7 @@ ostream& operator << (ostream& stream, const Resource::DiskInfo& disk) {
 }
 
 
-ostream& operator << (ostream& stream, const Resource& resource)
+ostream& operator<<(ostream& stream, const Resource& resource)
 {
   stream << resource.name();
 
@@ -1241,9 +1243,9 @@ ostream& operator << (ostream& stream, const Resource& resource)
 }
 
 
-ostream& operator << (ostream& stream, const Resources& resources)
+ostream& operator<<(ostream& stream, const Resources& resources)
 {
-  mesos::Resources::const_iterator it = resources.begin();
+  Resources::const_iterator it = resources.begin();
 
   while (it != resources.end()) {
     stream << *it;

@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <stdlib.h>
 
 #include <gmock/gmock.h>
@@ -46,7 +60,7 @@ public:
 
 // The test verifies that callbacks are properly serialized by the
 // Sequence object.
-TEST(Sequence, Serialize)
+TEST(SequenceTest, Serialize)
 {
   TestProcess process;
   spawn(process);
@@ -96,7 +110,7 @@ public:
 
 
 // The tests verifies semantics of discarding one returned future.
-TEST(Sequence, DiscardOne)
+TEST(SequenceTest, DiscardOne)
 {
   DiscardProcess process;
   spawn(process);
@@ -146,7 +160,7 @@ TEST(Sequence, DiscardOne)
 
 // The test verifies the semantics of deleting the Sequence object,
 // which will result in all pending callbacks being discarded.
-TEST(Sequence, DiscardAll)
+TEST(SequenceTest, DiscardAll)
 {
   DiscardProcess process;
   spawn(process);
@@ -226,7 +240,7 @@ private:
 };
 
 
-TEST(Sequence, Random)
+TEST(SequenceTest, Random)
 {
   RandomProcess process;
   spawn(process);

@@ -1,3 +1,17 @@
+/**
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License
+*/
+
 #include <signal.h>
 #include <unistd.h>
 
@@ -5,11 +19,14 @@
 
 #include <event2/event.h>
 #include <event2/thread.h>
+#include <event2/util.h>
 
 #include <process/logging.hpp>
+#include <process/once.hpp>
 
 #include <stout/os/signals.hpp>
 #include <stout/synchronized.hpp>
+#include <stout/thread_local.hpp>
 
 #include "event_loop.hpp"
 #include "libevent.hpp"
@@ -24,7 +41,7 @@ std::queue<lambda::function<void(void)>>* functions =
   new std::queue<lambda::function<void(void)>>();
 
 
-ThreadLocal<bool>* _in_event_loop_ = new ThreadLocal<bool>();
+THREAD_LOCAL bool* _in_event_loop_ = NULL;
 
 
 void async_function(int socket, short which, void* arg)
@@ -76,7 +93,7 @@ void run_in_event_loop(
 }
 
 
-void* EventLoop::run(void*)
+void EventLoop::run()
 {
   __in_event_loop__ = true;
 
@@ -109,8 +126,12 @@ void* EventLoop::run(void*)
       LOG(FATAL) << "Failure to unblock SIGPIPE";
     }
   }
+}
 
-  return NULL;
+
+void EventLoop::stop()
+{
+  event_base_loopexit(base, NULL);
 }
 
 
@@ -156,13 +177,14 @@ void EventLoop::delay(
 
 double EventLoop::time()
 {
-  // Get the cached time if running the event loop, or call
-  // gettimeofday() to get the current time. Since a lot of logic in
+  // We explicitly call `evutil_gettimeofday()` for now to avoid any
+  // issues that may be introduced by using the cached value provided
+  // by `event_base_gettimeofday_cached()`. Since a lot of logic in
   // libprocess depends on time math, we want to log fatal rather than
   // cause logic errors if the time fails.
   timeval t;
-  if (event_base_gettimeofday_cached(base, &t) < 0) {
-    LOG(FATAL) << "Failed to get time, event_base_gettimeofday_cached";
+  if (evutil_gettimeofday(&t, NULL) < 0) {
+    LOG(FATAL) << "Failed to get time, evutil_gettimeofday";
   }
 
   return Duration(t).secs();
@@ -171,9 +193,25 @@ double EventLoop::time()
 
 void EventLoop::initialize()
 {
+  static Once* initialized = new Once();
+
+  if (initialized->once()) {
+    return;
+  }
+
+  // We need to initialize Libevent differently depending on the
+  // operating system threading support.
+#if defined(EVTHREAD_USE_PTHREADS_IMPLEMENTED)
   if (evthread_use_pthreads() < 0) {
     LOG(FATAL) << "Failed to initialize, evthread_use_pthreads";
   }
+#elif defined(EVTHREAD_USE_WINDOWS_THREADS_IMPLEMENTED)
+  if (evthread_use_windows_threads() < 0) {
+    LOG(FATAL) << "Failed to initialize, evthread_use_windows_threads";
+  }
+#else
+#error "Libevent must be compiled with either pthread or Windows thread support"
+#endif
 
   // This enables debugging of libevent calls. We can remove this
   // when the implementation settles and after we gain confidence.
@@ -189,6 +227,8 @@ void EventLoop::initialize()
   if (base == NULL) {
     LOG(FATAL) << "Failed to initialize, event_base_new";
   }
+
+  initialized->done();
 }
 
 } // namespace process {

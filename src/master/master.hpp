@@ -30,12 +30,15 @@
 
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
-#include <mesos/scheduler.hpp>
 #include <mesos/type_utils.hpp>
+
+#include <mesos/maintenance/maintenance.hpp>
 
 #include <mesos/master/allocator.hpp>
 
 #include <mesos/module/authenticator.hpp>
+
+#include <mesos/scheduler/scheduler.hpp>
 
 #include <process/limiter.hpp>
 #include <process/http.hpp>
@@ -52,16 +55,22 @@
 #include <stout/hashset.hpp>
 #include <stout/multihashmap.hpp>
 #include <stout/option.hpp>
+#include <stout/recordio.hpp>
 
+#include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/resources_utils.hpp"
 
 #include "files/files.hpp"
 
+#include "internal/devolve.hpp"
+#include "internal/evolve.hpp"
+
 #include "master/constants.hpp"
 #include "master/contender.hpp"
 #include "master/detector.hpp"
 #include "master/flags.hpp"
+#include "master/machine.hpp"
 #include "master/metrics.hpp"
 #include "master/registrar.hpp"
 #include "master/validation.hpp"
@@ -73,6 +82,10 @@ class RateLimiter; // Forward declaration.
 }
 
 namespace mesos {
+
+// Forward declarations.
+class Authorizer;
+
 namespace internal {
 
 // Forward declarations.
@@ -80,7 +93,6 @@ namespace registry {
 class Slaves;
 }
 
-class Authorizer;
 class WhitelistWatcher;
 
 namespace master {
@@ -89,12 +101,16 @@ class Repairer;
 class SlaveObserver;
 
 struct BoundedRateLimiter;
+struct Framework;
+struct HttpConnection;
+struct Role;
 
 
 struct Slave
 {
   Slave(const SlaveInfo& _info,
         const process::UPID& _pid,
+        const MachineID& _machineId,
         const Option<std::string> _version,
         const process::Time& _registeredTime,
         const Resources& _checkpointedResources,
@@ -104,6 +120,7 @@ struct Slave
           std::vector<Task>())
     : id(_info.id()),
       info(_info),
+      machineId(_machineId),
       pid(_pid),
       version(_version),
       registeredTime(_registeredTime),
@@ -219,6 +236,22 @@ struct Slave
     offers.erase(offer);
   }
 
+  void addInverseOffer(InverseOffer* inverseOffer)
+  {
+    CHECK(!inverseOffers.contains(inverseOffer))
+      << "Duplicate inverse offer " << inverseOffer->id();
+
+    inverseOffers.insert(inverseOffer);
+  }
+
+  void removeInverseOffer(InverseOffer* inverseOffer)
+  {
+    CHECK(inverseOffers.contains(inverseOffer))
+      << "Unknown inverse offer " << inverseOffer->id();
+
+    inverseOffers.erase(inverseOffer);
+  }
+
   bool hasExecutor(const FrameworkID& frameworkId,
                    const ExecutorID& executorId) const
   {
@@ -266,6 +299,8 @@ struct Slave
   const SlaveID id;
   const SlaveInfo info;
 
+  const MachineID machineId;
+
   process::UPID pid;
 
   // The Mesos version of the slave. If set, the slave is >= 0.21.0.
@@ -300,6 +335,9 @@ struct Slave
   // Active offers on this slave.
   hashset<Offer*> offers;
 
+  // Active inverse offers on this slave.
+  hashset<InverseOffer*> inverseOffers;
+
   hashmap<FrameworkID, Resources> usedResources;  // Active task / executors.
   Resources offeredResources; // Offers.
 
@@ -319,328 +357,15 @@ struct Slave
 
 private:
   Slave(const Slave&);              // No copying.
-  Slave& operator = (const Slave&); // No assigning.
+  Slave& operator=(const Slave&); // No assigning.
 };
 
 
-inline std::ostream& operator << (std::ostream& stream, const Slave& slave)
+inline std::ostream& operator<<(std::ostream& stream, const Slave& slave)
 {
   return stream << slave.id << " at " << slave.pid
                 << " (" << slave.info.hostname() << ")";
 }
-
-
-// Information about a connected or completed framework.
-// TODO(bmahler): Keeping the task and executor information in sync
-// across the Slave and Framework structs is error prone!
-struct Framework
-{
-  Framework(const FrameworkInfo& _info,
-            const process::UPID& _pid,
-            const process::Time& time = process::Clock::now())
-    : info(_info),
-      pid(_pid),
-      connected(true),
-      active(true),
-      registeredTime(time),
-      reregisteredTime(time),
-      completedTasks(MAX_COMPLETED_TASKS_PER_FRAMEWORK) {}
-
-  ~Framework() {}
-
-  Task* getTask(const TaskID& taskId)
-  {
-    if (tasks.count(taskId) > 0) {
-      return tasks[taskId];
-    } else {
-      return NULL;
-    }
-  }
-
-  void addTask(Task* task)
-  {
-    CHECK(!tasks.contains(task->task_id()))
-      << "Duplicate task " << task->task_id()
-      << " of framework " << task->framework_id();
-
-    tasks[task->task_id()] = task;
-
-    if (!protobuf::isTerminalState(task->state())) {
-      totalUsedResources += task->resources();
-      usedResources[task->slave_id()] += task->resources();
-    }
-  }
-
-  // Notification of task termination, for resource accounting.
-  // TODO(bmahler): This is a hack for performance. We need to
-  // maintain resource counters because computing task resources
-  // functionally for all tasks is expensive, for now.
-  void taskTerminated(Task* task)
-  {
-    CHECK(protobuf::isTerminalState(task->state()));
-    CHECK(tasks.contains(task->task_id()))
-      << "Unknown task " << task->task_id()
-      << " of framework " << task->framework_id();
-
-    totalUsedResources -= task->resources();
-    usedResources[task->slave_id()] -= task->resources();
-    if (usedResources[task->slave_id()].empty()) {
-      usedResources.erase(task->slave_id());
-    }
-  }
-
-  void addCompletedTask(const Task& task)
-  {
-    // TODO(adam-mesos): Check if completed task already exists.
-    completedTasks.push_back(std::shared_ptr<Task>(new Task(task)));
-  }
-
-  void removeTask(Task* task)
-  {
-    CHECK(tasks.contains(task->task_id()))
-      << "Unknown task " << task->task_id()
-      << " of framework " << task->framework_id();
-
-    if (!protobuf::isTerminalState(task->state())) {
-      totalUsedResources -= task->resources();
-      usedResources[task->slave_id()] -= task->resources();
-      if (usedResources[task->slave_id()].empty()) {
-        usedResources.erase(task->slave_id());
-      }
-    }
-
-    addCompletedTask(*task);
-
-    tasks.erase(task->task_id());
-  }
-
-  void addOffer(Offer* offer)
-  {
-    CHECK(!offers.contains(offer)) << "Duplicate offer " << offer->id();
-    offers.insert(offer);
-    totalOfferedResources += offer->resources();
-    offeredResources[offer->slave_id()] += offer->resources();
-  }
-
-  void removeOffer(Offer* offer)
-  {
-    CHECK(offers.find(offer) != offers.end())
-      << "Unknown offer " << offer->id();
-
-    totalOfferedResources -= offer->resources();
-    offeredResources[offer->slave_id()] -= offer->resources();
-    if (offeredResources[offer->slave_id()].empty()) {
-      offeredResources.erase(offer->slave_id());
-    }
-
-    offers.erase(offer);
-  }
-
-  bool hasExecutor(const SlaveID& slaveId,
-                   const ExecutorID& executorId)
-  {
-    return executors.contains(slaveId) &&
-      executors[slaveId].contains(executorId);
-  }
-
-  void addExecutor(const SlaveID& slaveId,
-                   const ExecutorInfo& executorInfo)
-  {
-    CHECK(!hasExecutor(slaveId, executorInfo.executor_id()))
-      << "Duplicate executor " << executorInfo.executor_id()
-      << " on slave " << slaveId;
-
-    executors[slaveId][executorInfo.executor_id()] = executorInfo;
-    totalUsedResources += executorInfo.resources();
-    usedResources[slaveId] += executorInfo.resources();
-  }
-
-  void removeExecutor(const SlaveID& slaveId,
-                      const ExecutorID& executorId)
-  {
-    CHECK(hasExecutor(slaveId, executorId))
-      << "Unknown executor " << executorId
-      << " of framework " << id()
-      << " of slave " << slaveId;
-
-    totalUsedResources -= executors[slaveId][executorId].resources();
-    usedResources[slaveId] -= executors[slaveId][executorId].resources();
-    if (usedResources[slaveId].empty()) {
-      usedResources.erase(slaveId);
-    }
-
-    executors[slaveId].erase(executorId);
-    if (executors[slaveId].empty()) {
-      executors.erase(slaveId);
-    }
-  }
-
-  const FrameworkID id() const { return info.id(); }
-
-  // Update fields in 'info' using those in 'source'. Currently this
-  // only updates 'name', 'failover_timeout', 'hostname', and
-  // 'webui_url'.
-  void updateFrameworkInfo(const FrameworkInfo& source)
-  {
-    // TODO(jmlvanre): We can't check 'FrameworkInfo.id' yet because
-    // of MESOS-2559. Once this is fixed we can 'CHECK' that we only
-    // merge 'info' from the same framework 'id'.
-
-    // TODO(jmlvanre): Merge other fields as per design doc in
-    // MESOS-703.
-
-    if (source.user() != info.user()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.user to '" << info.user()
-                   << "' for framework " << id() << ". Check MESOS-703";
-    }
-
-    info.set_name(source.name());
-
-    if (source.has_failover_timeout()) {
-      info.set_failover_timeout(source.failover_timeout());
-    } else {
-      info.clear_failover_timeout();
-    }
-
-    if (source.checkpoint() != info.checkpoint()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.checkpoint to '"
-                   << stringify(info.checkpoint()) << "' for framework " << id()
-                   << ". Check MESOS-703";
-    }
-
-    if (source.role() != info.role()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.role to '" << info.role()
-                   << "' for framework " << id() << ". Check MESOS-703";
-    }
-
-    if (source.has_hostname()) {
-      info.set_hostname(source.hostname());
-    } else {
-      info.clear_hostname();
-    }
-
-    if (source.principal() != info.principal()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.principal to '"
-                   << info.principal() << "' for framework " << id()
-                   << ". Check MESOS-703";
-    }
-
-    if (source.has_webui_url()) {
-      info.set_webui_url(source.webui_url());
-    } else {
-      info.clear_webui_url();
-    }
-  }
-
-  FrameworkInfo info;
-
-  process::UPID pid;
-
-  // Framework becomes disconnected when the socket closes.
-  bool connected;
-
-  // Framework becomes deactivated when it is disconnected or
-  // the master receives a DeactivateFrameworkMessage.
-  // No offers will be made to a deactivated framework.
-  bool active;
-
-  process::Time registeredTime;
-  process::Time reregisteredTime;
-  process::Time unregisteredTime;
-
-  // Tasks that have not yet been launched because they are currently
-  // being authorized.
-  hashmap<TaskID, TaskInfo> pendingTasks;
-
-  hashmap<TaskID, Task*> tasks;
-
-  // NOTE: We use a shared pointer for Task because clang doesn't like
-  // Boost's implementation of circular_buffer with Task (Boost
-  // attempts to do some memset's which are unsafe).
-  boost::circular_buffer<std::shared_ptr<Task>> completedTasks;
-
-  hashset<Offer*> offers; // Active offers for framework.
-
-  hashmap<SlaveID, hashmap<ExecutorID, ExecutorInfo>> executors;
-
-  // NOTE: For the used and offered resources below, we keep the
-  // total as well as partitioned by SlaveID.
-  // We expose the total resources via the HTTP endpoint, and we
-  // keep a running total of the resources because looping over the
-  // slaves to sum the resources has led to perf issues (MESOS-1862).
-  // We keep the resources partitioned by SlaveID because non-scalar
-  // resources can be lost when summing them up across multiple
-  // slaves (MESOS-2373).
-  //
-  // Also note that keeping the totals is safe even though it yields
-  // incorrect results for non-scalar resources.
-  //   (1) For overlapping set items / ranges across slaves, these
-  //       will get added N times but only represented once.
-  //   (2) When an initial subtraction occurs (N-1), the resource is
-  //       no longer represented. (This is the source of the bug).
-  //   (3) When any further subtractions occur (N-(1+M)), the
-  //       Resources simply ignores the subtraction since there's
-  //       nothing to remove, so this is safe for now.
-
-  // TODO(mpark): Strip the non-scalar resources out of the totals
-  // in order to avoid reporting incorrect statistics (MESOS-2623).
-
-  // Active task / executor resources.
-  Resources totalUsedResources;
-  hashmap<SlaveID, Resources> usedResources;
-
-  // Offered resources.
-  Resources totalOfferedResources;
-  hashmap<SlaveID, Resources> offeredResources;
-
-private:
-  Framework(const Framework&);              // No copying.
-  Framework& operator = (const Framework&); // No assigning.
-};
-
-
-inline std::ostream& operator << (
-    std::ostream& stream,
-    const Framework& framework)
-{
-  // TODO(vinod): Also log the hostname once FrameworkInfo is properly
-  // updated on framework failover (MESOS-1784).
-  return stream << framework.id() << " (" << framework.info.name()
-                << ") at " << framework.pid;
-}
-
-
-// Information about an active role.
-struct Role
-{
-  explicit Role(const mesos::master::RoleInfo& _info)
-    : info(_info) {}
-
-  void addFramework(Framework* framework)
-  {
-    frameworks[framework->id()] = framework;
-  }
-
-  void removeFramework(Framework* framework)
-  {
-    frameworks.erase(framework->id());
-  }
-
-  Resources resources() const
-  {
-    Resources resources;
-    foreachvalue (Framework* framework, frameworks) {
-      resources += framework->totalUsedResources;
-      resources += framework->totalOfferedResources;
-    }
-
-    return resources;
-  }
-
-  mesos::master::RoleInfo info;
-
-  hashmap<FrameworkID, Framework*> frameworks;
-};
 
 
 class Master : public ProtobufProcess<Master>
@@ -716,6 +441,13 @@ public:
       const ExecutorID& executorId,
       const std::string& data);
 
+  void executorMessage(
+      const process::UPID& from,
+      const SlaveID& slaveId,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId,
+      const std::string& data);
+
   void registerSlave(
       const process::UPID& from,
       const SlaveInfo& slaveInfo,
@@ -755,6 +487,10 @@ public:
       const SlaveID& slaveId,
       const Resources& oversubscribedResources);
 
+  void updateUnavailability(
+      const MachineID& machineId,
+      const Option<Unavailability>& unavailability);
+
   void shutdownSlave(
       const SlaveID& slaveId,
       const std::string& message);
@@ -773,6 +509,10 @@ public:
   void offer(
       const FrameworkID& framework,
       const hashmap<SlaveID, Resources>& resources);
+
+  void inverseOffer(
+      const FrameworkID& framework,
+      const hashmap<SlaveID, UnavailableResources>& resources);
 
   // Invoked when there is a newly elected leading master.
   // Made public for testing purposes.
@@ -809,9 +549,13 @@ public:
 protected:
   virtual void initialize();
   virtual void finalize();
-  virtual void exited(const process::UPID& pid);
+
   virtual void visit(const process::MessageEvent& event);
   virtual void visit(const process::ExitedEvent& event);
+
+  virtual void exited(const process::UPID& pid);
+  void exited(const FrameworkID& frameworkId, const HttpConnection& http);
+  void _exited(Framework* framework);
 
   // Invoked when the message is ready to be executed after
   // being throttled.
@@ -873,25 +617,18 @@ protected:
       const std::vector<ExecutorInfo>& executors,
       const std::vector<Task>& tasks);
 
-  // 'registerFramework()' continuation.
-  void _registerFramework(
-      const process::UPID& from,
-      const FrameworkInfo& frameworkInfo,
-      const process::Future<Option<Error>>& validationError);
-
-  // 'reregisterFramework()' continuation.
-  void _reregisterFramework(
-      const process::UPID& from,
-      const FrameworkInfo& frameworkInfo,
-      bool failover,
-      const process::Future<Option<Error>>& validationError);
-
   // Add a framework.
   void addFramework(Framework* framework);
 
   // Replace the scheduler for a framework with a new process ID, in
   // the event of a scheduler failover.
   void failoverFramework(Framework* framework, const process::UPID& newPid);
+
+  // Replace the scheduler for a framework with a new HTTP connection,
+  // in the event of a scheduler failover.
+  void failoverFramework(Framework* framework, const HttpConnection& http);
+
+  void _failoverFramework(Framework* framework);
 
   // Kill all of a framework's tasks, delete the framework object, and
   // reschedule offers that were assigned to this framework.
@@ -932,9 +669,17 @@ protected:
       const std::string& message,
       Option<process::metrics::Counter> reason = None());
 
-  // Authorizes the task.
-  // Returns true if task is authorized.
-  // Returns false if task is not authorized.
+  // Validates that the framework is authenticated, if required.
+  Option<Error> validateFrameworkAuthentication(
+      const FrameworkInfo& frameworkInfo,
+      const process::UPID& from);
+
+  // Returns whether the framework is authorized.
+  // Returns failure for transient authorization failures.
+  process::Future<bool> authorizeFramework(
+      const FrameworkInfo& frameworkInfo);
+
+  // Returns whether the task is authorized.
   // Returns failure for transient authorization failures.
   process::Future<bool> authorizeTask(
       const TaskInfo& task,
@@ -959,11 +704,21 @@ protected:
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
 
-  // Updates slave's resources by applying the given operation. It
-  // also updates the allocator and sends a CheckpointResourcesMessage
-  // to the slave with slave's current checkpointed resources.
-  void applyOfferOperation(
+  // Updates the allocator and updates the slave's resources by
+  // applying the given operation. It also sends a
+  // 'CheckpointResourcesMessage' to the slave with the updated
+  // checkpointed resources.
+  void apply(
       Framework* framework,
+      Slave* slave,
+      const Offer::Operation& operation);
+
+  // Attempts to update the allocator by applying the given operation.
+  // If successful, updates the slave's resources, sends a
+  // 'CheckpointResourcesMessage' to the slave with the updated
+  // checkpointed resources, and returns a 'Future' with 'Nothing'.
+  // Otherwise, no action is taken and returns a failed 'Future'.
+  process::Future<Nothing> apply(
       Slave* slave,
       const Offer::Operation& operation);
 
@@ -979,8 +734,15 @@ protected:
   // Remove an offer and optionally rescind the offer as well.
   void removeOffer(Offer* offer, bool rescind = false);
 
+  // Remove an inverse offer after specified timeout
+  void inverseOfferTimeout(const OfferID& inverseOfferId);
+
+  // Remove an inverse offer and optionally rescind it as well.
+  void removeInverseOffer(InverseOffer* inverseOffer, bool rescind = false);
+
   Framework* getFramework(const FrameworkID& frameworkId);
   Offer* getOffer(const OfferID& offerId);
+  InverseOffer* getInverseOffer(const OfferID& inverseOfferId);
 
   FrameworkID newFrameworkId();
   OfferID newOfferId();
@@ -989,6 +751,8 @@ protected:
   Option<Credentials> credentials;
 
 private:
+  void _apply(Slave* slave, const Offer::Operation& operation);
+
   void drop(
       const process::UPID& from,
       const scheduler::Call& call,
@@ -1005,8 +769,24 @@ private:
       const scheduler::Call& call);
 
   void subscribe(
+      HttpConnection http,
+      const scheduler::Call::Subscribe& subscribe);
+
+  void _subscribe(
+      HttpConnection http,
+      const scheduler::Call::Subscribe& subscribe,
+      const process::Future<bool>& authorized);
+
+  void subscribe(
       const process::UPID& from,
       const scheduler::Call::Subscribe& subscribe);
+
+  void _subscribe(
+      const process::UPID& from,
+      const scheduler::Call::Subscribe& subscribe,
+      const process::Future<bool>& authorized);
+
+  void teardown(Framework* framework);
 
   void accept(
       Framework* framework,
@@ -1045,6 +825,12 @@ private:
       Framework* framework,
       const scheduler::Call::Message& message);
 
+  void request(
+      Framework* framework,
+      const scheduler::Call::Request& request);
+
+  void suppress(Framework* framework);
+
   bool elected() const
   {
     return leader.isSome() && leader.get() == info_;
@@ -1061,6 +847,10 @@ private:
     // desired request handler to get consistent request logging.
     static void log(const process::http::Request& request);
 
+    // /api/v1/scheduler
+    process::Future<process::http::Response> scheduler(
+        const process::http::Request& request) const;
+
     // /master/health
     process::Future<process::http::Response> health(
         const process::http::Request& request) const;
@@ -1073,7 +863,11 @@ private:
     process::Future<process::http::Response> redirect(
         const process::http::Request& request) const;
 
-    // /master/roles.json
+    // /master/reserve
+    process::Future<process::http::Response> reserve(
+        const process::http::Request& request) const;
+
+    // /master/roles
     process::Future<process::http::Response> roles(
         const process::http::Request& request) const;
 
@@ -1085,7 +879,7 @@ private:
     process::Future<process::http::Response> slaves(
         const process::http::Request& request) const;
 
-    // /master/state.json
+    // /master/state
     process::Future<process::http::Response> state(
         const process::http::Request& request) const;
 
@@ -1093,20 +887,46 @@ private:
     process::Future<process::http::Response> stateSummary(
         const process::http::Request& request) const;
 
-    // /master/tasks.json
+    // /master/tasks
     process::Future<process::http::Response> tasks(
         const process::http::Request& request) const;
 
+    // /master/maintenance/schedule
+    process::Future<process::http::Response> maintenanceSchedule(
+        const process::http::Request& request) const;
+
+    // /master/maintenance/status
+    process::Future<process::http::Response> maintenanceStatus(
+        const process::http::Request& request) const;
+
+    // /master/machine/down
+    process::Future<process::http::Response> machineDown(
+        const process::http::Request& request) const;
+
+    // /master/machine/up
+    process::Future<process::http::Response> machineUp(
+        const process::http::Request& request) const;
+
+    // /master/unreserve
+    process::Future<process::http::Response> unreserve(
+        const process::http::Request& request) const;
+
+    const static std::string SCHEDULER_HELP;
     const static std::string HEALTH_HELP;
     const static std::string OBSERVE_HELP;
     const static std::string REDIRECT_HELP;
     const static std::string ROLES_HELP;
-    const static std::string SHUTDOWN_HELP;  // Deprecated.
     const static std::string TEARDOWN_HELP;
     const static std::string SLAVES_HELP;
     const static std::string STATE_HELP;
     const static std::string STATESUMMARY_HELP;
     const static std::string TASKS_HELP;
+    const static std::string MAINTENANCE_SCHEDULE_HELP;
+    const static std::string MAINTENANCE_STATUS_HELP;
+    const static std::string MACHINE_DOWN_HELP;
+    const static std::string MACHINE_UP_HELP;
+    const static std::string RESERVE_HELP;
+    const static std::string UNRESERVE_HELP;
 
   private:
     // Helper for doing authentication, returns the credential used if
@@ -1120,12 +940,36 @@ private:
         const FrameworkID& id,
         bool authorized = true) const;
 
+    /**
+     * Continuation for operations: /reserve, /unreserve, /create and
+     * /destroy. First tries to recover 'remaining' amount of
+     * resources by rescinding outstanding offers, then tries to apply
+     * the operation by calling 'master->apply' and propagates the
+     * 'Future<Nothing>' as 'Future<Response>' where 'Nothing' -> 'OK'
+     * and Failed -> 'Conflict'.
+     *
+     * @param slaveId The ID of the slave that the operation is
+     *     updating.
+     * @param remaining The resources needed to satisfy the operation.
+     *     This is used for an optimization where we try to only
+     *     rescind offers that would contribute to satisfying the
+     *     operation.
+     * @param operation The operation to be performed.
+     *
+     * @return Returns 'OK' if successful, 'Conflict' otherwise.
+     */
+    process::Future<process::http::Response> _operation(
+        const SlaveID& slaveId,
+        Resources remaining,
+        const Offer::Operation& operation) const;
+
     Master* master;
   };
 
   Master(const Master&);              // No copying.
-  Master& operator = (const Master&); // No assigning.
+  Master& operator=(const Master&); // No assigning.
 
+  friend struct Framework;
   friend struct Metrics;
 
   // NOTE: Since 'getOffer' and 'slaves' are protected,
@@ -1152,6 +996,17 @@ private:
   const Option<Authorizer*> authorizer;
 
   MasterInfo info_;
+
+  // Holds some info which affects how a machine behaves, as well as state that
+  // represent the master's view of this machine. See the `MachineInfo` protobuf
+  // and `Machine` struct for more information.
+  hashmap<MachineID, Machine> machines;
+
+  struct Maintenance
+  {
+    // Holds the maintenance schedule, as given by the operator.
+    std::list<mesos::maintenance::Schedule> schedules;
+  } maintenance;
 
   // Indicates when recovery is complete. Recovery begins once the
   // master is elected as a leader.
@@ -1199,12 +1054,12 @@ private:
 
       Slave* get(const SlaveID& slaveId) const
       {
-        return ids.get(slaveId).get(NULL);
+        return ids.get(slaveId).getOrElse(NULL);
       }
 
       Slave* get(const process::UPID& pid) const
       {
-        return pids.get(pid).get(NULL);
+        return pids.get(pid).getOrElse(NULL);
       }
 
       void put(Slave* slave)
@@ -1308,6 +1163,9 @@ private:
 
   hashmap<OfferID, Offer*> offers;
   hashmap<OfferID, process::Timer> offerTimers;
+
+  hashmap<OfferID, InverseOffer*> inverseOffers;
+  hashmap<OfferID, process::Timer> inverseOfferTimers;
 
   hashmap<std::string, Role*> roles;
 
@@ -1504,6 +1362,548 @@ protected:
 
 private:
   const SlaveInfo info;
+};
+
+
+inline std::ostream& operator<<(
+    std::ostream& stream,
+    const Framework& framework);
+
+
+// Represents the streaming HTTP connection to a framework.
+struct HttpConnection
+{
+  HttpConnection(const process::http::Pipe::Writer& _writer,
+                 ContentType _contentType)
+    : writer(_writer),
+      contentType(_contentType),
+      encoder(lambda::bind(serialize, contentType, lambda::_1)) {}
+
+  // Converts the message to an Event before sending.
+  template <typename Message>
+  bool send(const Message& message)
+  {
+    // We need to evolve the internal 'message' into a
+    // 'v1::scheduler::Event'.
+    return writer.write(encoder.encode(evolve(message)));
+  }
+
+  bool close()
+  {
+    return writer.close();
+  }
+
+  process::Future<Nothing> closed() const
+  {
+    return writer.readerClosed();
+  }
+
+  process::http::Pipe::Writer writer;
+  ContentType contentType;
+  ::recordio::Encoder<v1::scheduler::Event> encoder;
+};
+
+
+// This process periodically sends heartbeats to a scheduler on the
+// given HTTP connection.
+class Heartbeater : public process::Process<Heartbeater>
+{
+public:
+  Heartbeater(const FrameworkID& _frameworkId,
+              const HttpConnection& _http,
+              const Duration& _interval)
+    : process::ProcessBase(process::ID::generate("heartbeater")),
+      frameworkId(_frameworkId),
+      http(_http),
+      interval(_interval) {}
+
+protected:
+  virtual void initialize() override
+  {
+    heartbeat();
+  }
+
+private:
+  void heartbeat()
+  {
+    // Only send a heartbeat if the connection is not closed.
+    if (http.closed().isPending()) {
+      VLOG(1) << "Sending heartbeat to " << frameworkId;
+
+      scheduler::Event event;
+      event.set_type(scheduler::Event::HEARTBEAT);
+
+      http.send(event);
+    }
+
+    process::delay(interval, self(), &Self::heartbeat);
+  }
+
+  const FrameworkID frameworkId;
+  HttpConnection http;
+  const Duration interval;
+};
+
+
+// Information about a connected or completed framework.
+// TODO(bmahler): Keeping the task and executor information in sync
+// across the Slave and Framework structs is error prone!
+struct Framework
+{
+  Framework(Master* const _master,
+            const FrameworkInfo& _info,
+            const process::UPID& _pid,
+            const process::Time& time = process::Clock::now())
+    : master(_master),
+      info(_info),
+      pid(_pid),
+      connected(true),
+      active(true),
+      registeredTime(time),
+      reregisteredTime(time),
+      completedTasks(MAX_COMPLETED_TASKS_PER_FRAMEWORK) {}
+
+  Framework(Master* const _master,
+            const FrameworkInfo& _info,
+            const HttpConnection& _http,
+            const process::Time& time = process::Clock::now())
+    : master(_master),
+      info(_info),
+      http(_http),
+      connected(true),
+      active(true),
+      registeredTime(time),
+      reregisteredTime(time),
+      completedTasks(MAX_COMPLETED_TASKS_PER_FRAMEWORK) {}
+
+  ~Framework()
+  {
+    if (http.isSome()) {
+      cleanupConnection();
+    }
+  }
+
+  Task* getTask(const TaskID& taskId)
+  {
+    if (tasks.count(taskId) > 0) {
+      return tasks[taskId];
+    }
+
+    return NULL;
+  }
+
+  void addTask(Task* task)
+  {
+    CHECK(!tasks.contains(task->task_id()))
+      << "Duplicate task " << task->task_id()
+      << " of framework " << task->framework_id();
+
+    tasks[task->task_id()] = task;
+
+    if (!protobuf::isTerminalState(task->state())) {
+      totalUsedResources += task->resources();
+      usedResources[task->slave_id()] += task->resources();
+    }
+  }
+
+  // Notification of task termination, for resource accounting.
+  // TODO(bmahler): This is a hack for performance. We need to
+  // maintain resource counters because computing task resources
+  // functionally for all tasks is expensive, for now.
+  void taskTerminated(Task* task)
+  {
+    CHECK(protobuf::isTerminalState(task->state()));
+    CHECK(tasks.contains(task->task_id()))
+      << "Unknown task " << task->task_id()
+      << " of framework " << task->framework_id();
+
+    totalUsedResources -= task->resources();
+    usedResources[task->slave_id()] -= task->resources();
+    if (usedResources[task->slave_id()].empty()) {
+      usedResources.erase(task->slave_id());
+    }
+  }
+
+  // Sends a message to the connected framework.
+  template <typename Message>
+  void send(const Message& message)
+  {
+    if (!connected) {
+      LOG(WARNING) << "Master attempted to send message to disconnected"
+                   << " framework " << *this;
+    }
+
+    if (http.isSome()) {
+      if (!http.get().send(message)) {
+        LOG(WARNING) << "Unable to send event to framework " << *this << ":"
+                     << " connection closed";
+      }
+    } else {
+      CHECK_SOME(pid);
+      master->send(pid.get(), message);
+    }
+  }
+
+  void addCompletedTask(const Task& task)
+  {
+    // TODO(adam-mesos): Check if completed task already exists.
+    completedTasks.push_back(std::shared_ptr<Task>(new Task(task)));
+  }
+
+  void removeTask(Task* task)
+  {
+    CHECK(tasks.contains(task->task_id()))
+      << "Unknown task " << task->task_id()
+      << " of framework " << task->framework_id();
+
+    if (!protobuf::isTerminalState(task->state())) {
+      totalUsedResources -= task->resources();
+      usedResources[task->slave_id()] -= task->resources();
+      if (usedResources[task->slave_id()].empty()) {
+        usedResources.erase(task->slave_id());
+      }
+    }
+
+    addCompletedTask(*task);
+
+    tasks.erase(task->task_id());
+  }
+
+  void addOffer(Offer* offer)
+  {
+    CHECK(!offers.contains(offer)) << "Duplicate offer " << offer->id();
+    offers.insert(offer);
+    totalOfferedResources += offer->resources();
+    offeredResources[offer->slave_id()] += offer->resources();
+  }
+
+  void removeOffer(Offer* offer)
+  {
+    CHECK(offers.find(offer) != offers.end())
+      << "Unknown offer " << offer->id();
+
+    totalOfferedResources -= offer->resources();
+    offeredResources[offer->slave_id()] -= offer->resources();
+    if (offeredResources[offer->slave_id()].empty()) {
+      offeredResources.erase(offer->slave_id());
+    }
+
+    offers.erase(offer);
+  }
+
+  void addInverseOffer(InverseOffer* inverseOffer)
+  {
+    CHECK(!inverseOffers.contains(inverseOffer))
+      << "Duplicate inverse offer " << inverseOffer->id();
+    inverseOffers.insert(inverseOffer);
+  }
+
+  void removeInverseOffer(InverseOffer* inverseOffer)
+  {
+    CHECK(inverseOffers.contains(inverseOffer))
+      << "Unknown inverse offer " << inverseOffer->id();
+
+    inverseOffers.erase(inverseOffer);
+  }
+
+  bool hasExecutor(const SlaveID& slaveId,
+                   const ExecutorID& executorId)
+  {
+    return executors.contains(slaveId) &&
+      executors[slaveId].contains(executorId);
+  }
+
+  void addExecutor(const SlaveID& slaveId,
+                   const ExecutorInfo& executorInfo)
+  {
+    CHECK(!hasExecutor(slaveId, executorInfo.executor_id()))
+      << "Duplicate executor " << executorInfo.executor_id()
+      << " on slave " << slaveId;
+
+    executors[slaveId][executorInfo.executor_id()] = executorInfo;
+    totalUsedResources += executorInfo.resources();
+    usedResources[slaveId] += executorInfo.resources();
+  }
+
+  void removeExecutor(const SlaveID& slaveId,
+                      const ExecutorID& executorId)
+  {
+    CHECK(hasExecutor(slaveId, executorId))
+      << "Unknown executor " << executorId
+      << " of framework " << id()
+      << " of slave " << slaveId;
+
+    totalUsedResources -= executors[slaveId][executorId].resources();
+    usedResources[slaveId] -= executors[slaveId][executorId].resources();
+    if (usedResources[slaveId].empty()) {
+      usedResources.erase(slaveId);
+    }
+
+    executors[slaveId].erase(executorId);
+    if (executors[slaveId].empty()) {
+      executors.erase(slaveId);
+    }
+  }
+
+  const FrameworkID id() const { return info.id(); }
+
+  // Update fields in 'info' using those in 'source'. Currently this
+  // only updates 'name', 'failover_timeout', 'hostname', 'webui_url',
+  // 'capabilities', and 'labels'.
+  void updateFrameworkInfo(const FrameworkInfo& source)
+  {
+    // TODO(jmlvanre): We can't check 'FrameworkInfo.id' yet because
+    // of MESOS-2559. Once this is fixed we can 'CHECK' that we only
+    // merge 'info' from the same framework 'id'.
+
+    // TODO(jmlvanre): Merge other fields as per design doc in
+    // MESOS-703.
+
+    if (source.user() != info.user()) {
+      LOG(WARNING) << "Can not update FrameworkInfo.user to '" << info.user()
+                   << "' for framework " << id() << ". Check MESOS-703";
+    }
+
+    info.set_name(source.name());
+
+    if (source.has_failover_timeout()) {
+      info.set_failover_timeout(source.failover_timeout());
+    } else {
+      info.clear_failover_timeout();
+    }
+
+    if (source.checkpoint() != info.checkpoint()) {
+      LOG(WARNING) << "Can not update FrameworkInfo.checkpoint to '"
+                   << stringify(info.checkpoint()) << "' for framework " << id()
+                   << ". Check MESOS-703";
+    }
+
+    if (source.role() != info.role()) {
+      LOG(WARNING) << "Can not update FrameworkInfo.role to '" << info.role()
+                   << "' for framework " << id() << ". Check MESOS-703";
+    }
+
+    if (source.has_hostname()) {
+      info.set_hostname(source.hostname());
+    } else {
+      info.clear_hostname();
+    }
+
+    if (source.principal() != info.principal()) {
+      LOG(WARNING) << "Can not update FrameworkInfo.principal to '"
+                   << info.principal() << "' for framework " << id()
+                   << ". Check MESOS-703";
+    }
+
+    if (source.has_webui_url()) {
+      info.set_webui_url(source.webui_url());
+    } else {
+      info.clear_webui_url();
+    }
+
+    if (source.capabilities_size() > 0) {
+      info.mutable_capabilities()->CopyFrom(source.capabilities());
+    } else {
+      info.clear_capabilities();
+    }
+
+    if (source.has_labels()) {
+      info.mutable_labels()->CopyFrom(source.labels());
+    } else {
+      info.clear_labels();
+    }
+  }
+
+  void updateConnection(const process::UPID& newPid)
+  {
+    // Cleanup the HTTP connnection if this is a downgrade from HTTP
+    // to PID. Note that the connection may already be closed.
+    if (http.isSome()) {
+      cleanupConnection();
+    }
+
+    // TODO(benh): unlink(oldPid);
+    pid = newPid;
+  }
+
+  void updateConnection(const HttpConnection& newHttp)
+  {
+    if (pid.isSome()) {
+      // Wipe the PID if this is an upgrade from PID to HTTP.
+      // TODO(benh): unlink(oldPid);
+      pid = None();
+    } else {
+      // Cleanup the old HTTP connection.
+      // Note that master creates a new HTTP connection for every
+      // subscribe request, so 'newHttp' should always be different
+      // from 'http'.
+      cleanupConnection();
+    }
+
+    CHECK_NONE(http);
+
+    http = newHttp;
+  }
+
+  // Closes the connection and stops the heartbeat.
+  // TODO(vinod): Currently 'connected' variable is set separately
+  // from this method. We need to make sure these are in sync.
+  void cleanupConnection()
+  {
+    CHECK_SOME(http);
+
+    if (connected && !http.get().close()) {
+      LOG(WARNING) << "Failed to close HTTP pipe for " << *this;
+    }
+
+    http = None();
+
+    CHECK_SOME(heartbeater);
+
+    terminate(heartbeater.get().get());
+    wait(heartbeater.get().get());
+
+    heartbeater = None();
+  }
+
+  void heartbeat()
+  {
+    CHECK_NONE(heartbeater);
+    CHECK_SOME(http);
+
+    // TODO(vinod): Make heartbeat interval configurable and include
+    // this information in the SUBSCRIBED response.
+    heartbeater =
+      new Heartbeater(info.id(), http.get(), DEFAULT_HEARTBEAT_INTERVAL);
+
+    process::spawn(heartbeater.get().get());
+  }
+
+  Master* const master;
+
+  FrameworkInfo info;
+
+  // Frameworks can either be connected via HTTP or by message
+  // passing (scheduler driver). Exactly one of 'http' and 'pid'
+  // will be set according to the last connection made by the
+  // framework.
+  Option<HttpConnection> http;
+  Option<process::UPID> pid;
+
+  // Framework becomes disconnected when the socket closes.
+  bool connected;
+
+  // Framework becomes deactivated when it is disconnected or
+  // the master receives a DeactivateFrameworkMessage.
+  // No offers will be made to a deactivated framework.
+  bool active;
+
+  process::Time registeredTime;
+  process::Time reregisteredTime;
+  process::Time unregisteredTime;
+
+  // Tasks that have not yet been launched because they are currently
+  // being authorized.
+  hashmap<TaskID, TaskInfo> pendingTasks;
+
+  hashmap<TaskID, Task*> tasks;
+
+  // NOTE: We use a shared pointer for Task because clang doesn't like
+  // Boost's implementation of circular_buffer with Task (Boost
+  // attempts to do some memset's which are unsafe).
+  boost::circular_buffer<std::shared_ptr<Task>> completedTasks;
+
+  hashset<Offer*> offers; // Active offers for framework.
+
+  hashset<InverseOffer*> inverseOffers; // Active inverse offers for framework.
+
+  hashmap<SlaveID, hashmap<ExecutorID, ExecutorInfo>> executors;
+
+  // NOTE: For the used and offered resources below, we keep the
+  // total as well as partitioned by SlaveID.
+  // We expose the total resources via the HTTP endpoint, and we
+  // keep a running total of the resources because looping over the
+  // slaves to sum the resources has led to perf issues (MESOS-1862).
+  // We keep the resources partitioned by SlaveID because non-scalar
+  // resources can be lost when summing them up across multiple
+  // slaves (MESOS-2373).
+  //
+  // Also note that keeping the totals is safe even though it yields
+  // incorrect results for non-scalar resources.
+  //   (1) For overlapping set items / ranges across slaves, these
+  //       will get added N times but only represented once.
+  //   (2) When an initial subtraction occurs (N-1), the resource is
+  //       no longer represented. (This is the source of the bug).
+  //   (3) When any further subtractions occur (N-(1+M)), the
+  //       Resources simply ignores the subtraction since there's
+  //       nothing to remove, so this is safe for now.
+
+  // TODO(mpark): Strip the non-scalar resources out of the totals
+  // in order to avoid reporting incorrect statistics (MESOS-2623).
+
+  // Active task / executor resources.
+  Resources totalUsedResources;
+  hashmap<SlaveID, Resources> usedResources;
+
+  // Offered resources.
+  Resources totalOfferedResources;
+  hashmap<SlaveID, Resources> offeredResources;
+
+  // This is only set for HTTP frameworks.
+  Option<process::Owned<Heartbeater>> heartbeater;
+
+private:
+  Framework(const Framework&);              // No copying.
+  Framework& operator=(const Framework&); // No assigning.
+};
+
+
+  inline std::ostream& operator<<(
+    std::ostream& stream,
+    const Framework& framework)
+{
+  // TODO(vinod): Also log the hostname once FrameworkInfo is properly
+  // updated on framework failover (MESOS-1784).
+  stream << framework.id() << " (" << framework.info.name() << ")";
+
+  if (framework.pid.isSome()) {
+    stream << " at " << framework.pid.get();
+  }
+
+  return stream;
+}
+
+
+// Information about an active role.
+struct Role
+{
+  explicit Role(const mesos::master::RoleInfo& _info)
+    : info(_info) {}
+
+  void addFramework(Framework* framework)
+  {
+    frameworks[framework->id()] = framework;
+  }
+
+  void removeFramework(Framework* framework)
+  {
+    frameworks.erase(framework->id());
+  }
+
+  Resources resources() const
+  {
+    Resources resources;
+    foreachvalue (Framework* framework, frameworks) {
+      resources += framework->totalUsedResources;
+      resources += framework->totalOfferedResources;
+    }
+
+    return resources;
+  }
+
+  mesos::master::RoleInfo info;
+
+  hashmap<FrameworkID, Framework*> frameworks;
 };
 
 } // namespace master {
