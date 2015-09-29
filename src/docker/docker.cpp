@@ -100,9 +100,12 @@ Try<Docker*> Docker::create(
     const string& socket,
     bool validate)
 {
+/*
+// TODO(misterbisson): disabling validation that excludes remote Docker endpoints
   if (!strings::startsWith(socket, "/")) {
     return Error("Invalid Docker socket path: " + socket);
   }
+*/
 
   Docker* docker = new Docker(path, socket);
   if (!validate) {
