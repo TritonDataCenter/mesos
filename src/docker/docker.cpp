@@ -127,6 +127,7 @@ Try<Docker*> Docker::create(const string& path, bool validate)
     return docker;
   }
 
+/*
 #ifdef __linux__
   // Make sure that cgroups are mounted, and at least the 'cpu'
   // subsystem is attached.
@@ -139,6 +140,7 @@ Try<Docker*> Docker::create(const string& path, bool validate)
                  "to mount cgroups manually");
   }
 #endif // __linux__
+*/
 
   Try<Nothing> validateVersion = docker->validateVersion(Version(1, 0, 0));
   if (validateVersion.isError()) {
@@ -399,6 +401,8 @@ Future<Nothing> Docker::run(
   argv.push_back("-e");
   argv.push_back("MESOS_SANDBOX=" + mappedDirectory);
 
+  /*
+
   foreach (const Volume& volume, containerInfo.volumes()) {
     string volumeConfig = volume.container_path();
     if (volume.has_host_path()) {
@@ -427,6 +431,8 @@ Future<Nothing> Docker::run(
   // Mapping sandbox directory into the container mapped directory.
   argv.push_back("-v");
   argv.push_back(sandboxDirectory + ":" + mappedDirectory);
+
+  */
 
   const string& image = dockerInfo.image();
 
